@@ -1,7 +1,8 @@
 import { Play, Pause, ChevronLeft, ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import * as Slider from '@radix-ui/react-slider';
-import { cn } from "@/lib/utils";
+
+const FORECAST_HORIZONS = [0, 15, 30, 45, 60] as const;
 
 interface ForecastTimelineProps {
   horizon: number;
@@ -11,32 +12,29 @@ interface ForecastTimelineProps {
 
 export function ForecastTimeline({ horizon, onHorizonChange, timestamp }: ForecastTimelineProps) {
   const [isPlaying, setIsPlaying] = useState(false);
-  const horizons = [0, 15, 30, 45, 60];
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isPlaying) {
       interval = setInterval(() => {
-        onHorizonChange((prev) => {
-          const currentIndex = horizons.indexOf(prev);
-          const nextIndex = (currentIndex + 1) % horizons.length;
-          return horizons[nextIndex];
-        });
+        const currentIndex = FORECAST_HORIZONS.indexOf(horizon as typeof FORECAST_HORIZONS[number]);
+        const nextIndex = (currentIndex + 1) % FORECAST_HORIZONS.length;
+        onHorizonChange(FORECAST_HORIZONS[nextIndex]);
       }, 2000);
     }
     return () => clearInterval(interval);
-  }, [isPlaying, onHorizonChange, horizons]);
+  }, [isPlaying, horizon, onHorizonChange]);
 
-  const currentIndex = horizons.indexOf(horizon);
+  const currentIndex = FORECAST_HORIZONS.indexOf(horizon as typeof FORECAST_HORIZONS[number]);
 
   const handlePrev = () => {
-    const nextIdx = currentIndex > 0 ? currentIndex - 1 : horizons.length - 1;
-    onHorizonChange(horizons[nextIdx]);
+    const nextIdx = currentIndex > 0 ? currentIndex - 1 : FORECAST_HORIZONS.length - 1;
+    onHorizonChange(FORECAST_HORIZONS[nextIdx]);
   };
 
   const handleNext = () => {
-    const nextIdx = currentIndex < horizons.length - 1 ? currentIndex + 1 : 0;
-    onHorizonChange(horizons[nextIdx]);
+    const nextIdx = currentIndex < FORECAST_HORIZONS.length - 1 ? currentIndex + 1 : 0;
+    onHorizonChange(FORECAST_HORIZONS[nextIdx]);
   };
 
   return (
@@ -77,9 +75,9 @@ export function ForecastTimeline({ horizon, onHorizonChange, timestamp }: Foreca
         <Slider.Root
           className="relative flex items-center select-none touch-none w-full h-5"
           value={[currentIndex]}
-          max={horizons.length - 1}
+          max={FORECAST_HORIZONS.length - 1}
           step={1}
-          onValueChange={(val) => onHorizonChange(horizons[val[0]])}
+          onValueChange={(val) => onHorizonChange(FORECAST_HORIZONS[val[0]])}
         >
           <Slider.Track className="bg-slate-700 relative grow rounded-full h-[4px]">
             <Slider.Range className="absolute bg-blue-500 rounded-full h-full" />

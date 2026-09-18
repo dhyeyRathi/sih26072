@@ -21,6 +21,9 @@ export interface Forecast {
   uncertainty_km: number;
   thunderstorm_probability: number;
   lightning_probability: number;
+  confidence_score?: number;
+  predicted_dbz?: number;
+  affected_area_km2?: number;
 }
 
 export interface StormTrajectory {
@@ -33,6 +36,8 @@ export interface StormTrajectory {
   trend: 'intensifying' | 'steady' | 'weakening' | 'dissipating';
   forecasts: Forecast[];
   trajectory_coords: number[][];
+  eta_ahmedabad_minutes?: number | null;
+  averaging_samples?: number;
 }
 
 export interface RiskAssessment {
@@ -91,5 +96,16 @@ export interface StormUpdatePayload {
     max_reflectivity: number;
     mean_reflectivity: number;
     active_cells: number;
+  };
+  radar_points?: Array<{ lat: number; lon: number; dbz: number }>;
+  exposure_summary?: {
+    total_assets: number;
+    critical_count: number;
+    warning_count: number;
+    watch_count: number;
+    safe_count: number;
+    composite_exposure_score: number;
+    threatened_districts: string[];
+    estimated_exposed_population: number;
   };
 }

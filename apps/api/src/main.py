@@ -22,11 +22,17 @@ from src.storms.detection import detect_storm_cells
 from src.storms.tracking import storm_tracker
 from src.risk.engine import assess_storm_risk
 from src.health.monitor import health_monitor
+from src.exposure.infrastructure import assess_all_infrastructure
 
 # Import routers
 from src.storms.router import router as storms_router
 from src.alerts.router import router as alerts_router, auto_generate_alert
 from src.health.router import router as health_router
+from src.exposure.router import router as exposure_router
+from src.explainability.router import router as explainability_router
+from src.historical.router import router as historical_router
+from src.copilot.router import router as copilot_router
+from src.ml.ablation import router as ablation_router
 
 
 # ---------------------------------------------------------------------------
@@ -49,19 +55,8 @@ async def run_nowcasting_pipeline():
             health_monitor.report_data("radar", latency_ms=int((time.time() - start) * 1000))
             health_monitor.report_data("lightning", latency_ms=5)
 
-            # 2. Detect storm cells from reflectivity grid
-            detected = detect_storm_cells(frame["grid"])
-
-            # Merge lightning rates from simulation into detected cells
-            for cell in detected:
-                matching_sim = next(
-                    (s for s in frame["storms"]
-                     if abs(s["center_lat"] - cell["center_lat"]) < 0.05
-                     and abs(s["center_lon"] - cell["center_lon"]) < 0.05),
-                    None
-                )
-                if matching_sim:
-                    cell["lightning_rate"] = matching_sim["lightning_rate"]
+            # 2. Ingest storm cells with persistent stable IDs and pinned centers
+            detected = frame["storms"]
 
             # 3. Track cells across time
             tracked = storm_tracker.update(detected, timestamp=frame["timestamp"])
@@ -78,15 +73,27 @@ async def run_nowcasting_pipeline():
                 # Auto-generate alerts for high/severe risk
                 if risk["risk_level"] in ("high", "severe"):
                     try:
-                        auto_generate_alert(cell, risk)
+                        created_alert = auto_generate_alert(cell, risk)
+                        if created_alert:
+                            await ws_manager.broadcast("alert_update", {
+                                "event": "created",
+                                "alert": created_alert,
+                            })
                     except Exception:
                         pass  # Don't crash the pipeline for alert generation failures
+
+            # 5b. Translate trajectories into infrastructure exposure.  This is
+            # kept separate from the ML/risk layers so it can be replaced by a
+            # PostGIS implementation without changing the stream contract.
+            exposure = assess_all_infrastructure(tracked, trajectories)
 
             # 6. Report model inference health
             latency_ms = int((time.time() - start) * 1000)
             health_monitor.report_inference(latency_ms=latency_ms, model_version="pytorch-deep-nowcaster-v2")
 
-            # 7. Broadcast updates via WebSocket
+            # 7. Extract lightweight radar heatmap points and broadcast updates via WebSocket
+            radar_points = extract_radar_points(frame["grid"])
+
             await ws_manager.broadcast("storm_update", {
                 "timestamp": frame["timestamp"],
                 "storms": tracked,
@@ -98,6 +105,8 @@ async def run_nowcasting_pipeline():
                     "mean_reflectivity": float(frame["grid"][frame["grid"] > 10].mean()) if (frame["grid"] > 10).any() else 0,
                     "active_cells": len(tracked),
                 },
+                "radar_points": radar_points,
+                "exposure_summary": exposure["summary"],
             })
 
             await ws_manager.broadcast("health_update", health_monitor.get_all_status())
@@ -107,8 +116,8 @@ async def run_nowcasting_pipeline():
             import traceback
             traceback.print_exc()
 
-        # Wait for next cycle (10-second interval for demo, configurable)
-        await asyncio.sleep(2)
+        # 1-second update cycle for real-time dashboard
+        await asyncio.sleep(1)
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +127,7 @@ async def run_nowcasting_pipeline():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the nowcasting pipeline on app startup."""
-    print("🌩️  SIH26072 — Thunderstorm & Lightning Nowcasting Platform")
+    print("SIH26072 -- Thunderstorm & Lightning Nowcasting Platform")
     print(f"   MVP Region: Gujarat/Ahmedabad ({settings.mvp_center_lat}, {settings.mvp_center_lon})")
     print(f"   Grid: {settings.grid_height}x{settings.grid_width} @ {settings.mvp_grid_resolution_km}km")
     print(f"   Time step: {settings.mvp_time_step_minutes} min")
@@ -161,6 +170,11 @@ app.add_middleware(
 app.include_router(storms_router, prefix="/api")
 app.include_router(alerts_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
+app.include_router(exposure_router, prefix="/api")
+app.include_router(explainability_router, prefix="/api")
+app.include_router(historical_router, prefix="/api")
+app.include_router(copilot_router, prefix="/api")
+app.include_router(ablation_router, prefix="/api")
 
 
 # ---------------------------------------------------------------------------
@@ -177,27 +191,30 @@ async def root():
     }
 
 
+def extract_radar_points(grid, min_dbz: float = 12.0) -> list[dict]:
+    """Extract lightweight point list from radar grid for real-time heatmap display."""
+    h, w = grid.shape
+    points = []
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            val = float(grid[y, x])
+            if val >= min_dbz:
+                lat = settings.mvp_center_lat + (y - h / 2) * (settings.mvp_grid_resolution_km / 111.0)
+                lon = settings.mvp_center_lon + (x - w / 2) * (settings.mvp_grid_resolution_km / 111.0)
+                points.append({
+                    "lat": round(lat, 4),
+                    "lon": round(lon, 4),
+                    "dbz": round(val, 1),
+                })
+    return points
+
+
 @app.get("/api/radar/current")
 async def get_current_radar():
     """Get the current radar reflectivity frame as a GeoJSON-compatible response."""
     frame = data_generator.get_current_frame()
     grid = frame["grid"]
-
-    # Convert to a list of significant cells (above 15 dBZ) for lightweight transport
-    significant_points = []
-    step = 2  # Subsample for performance
-    h, w = grid.shape
-    for y in range(0, h, step):
-        for x in range(0, w, step):
-            val = float(grid[y, x])
-            if val > 10:
-                lat = settings.mvp_center_lat + (y - h / 2) * (settings.mvp_grid_resolution_km / 111.0)
-                lon = settings.mvp_center_lon + (x - w / 2) * (settings.mvp_grid_resolution_km / 111.0)
-                significant_points.append({
-                    "lat": round(lat, 4),
-                    "lon": round(lon, 4),
-                    "dbz": round(val, 1),
-                })
+    significant_points = extract_radar_points(grid, min_dbz=10.0)
 
     return {
         "timestamp": frame["timestamp"],
@@ -226,10 +243,11 @@ async def get_current_lightning():
 async def get_forecast(horizon: int):
     """
     Get forecast for a specific horizon (minutes ahead).
-    Valid horizons: 10, 20, 30, 40, 50, 60
+    Valid horizons: 15, 30, 45, 60. These match the trained model heads and
+    the dashboard timeline; accepting other values would mislabel a forecast.
     """
-    if horizon not in (10, 20, 30, 40, 50, 60):
-        return {"error": "Horizon must be one of: 10, 20, 30, 40, 50, 60"}
+    if horizon not in (15, 30, 45, 60):
+        return {"error": "Horizon must be one of: 15, 30, 45, 60"}
 
     trajectories = storm_tracker.predict_trajectories(horizons_minutes=[horizon])
 
@@ -287,6 +305,8 @@ async def websocket_endpoint(websocket: WebSocket):
             
             frame = data_generator.get_current_frame()
             lightning = data_generator.generate_lightning_data(frame)
+            initial_radar_pts = extract_radar_points(frame["grid"])
+            exposure = assess_all_infrastructure(tracked, trajectories)
             
             await ws_manager.send_personal(websocket, "storm_update", {
                 "timestamp": frame["timestamp"],
@@ -294,6 +314,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 "trajectories": trajectories,
                 "risks": risks,
                 "lightning": lightning,
+                "radar_points": initial_radar_pts,
+                "exposure_summary": exposure["summary"],
             })
         await ws_manager.send_personal(websocket, "health_update", health_monitor.get_all_status())
 

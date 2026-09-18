@@ -1,13 +1,14 @@
 import { RiskAssessment } from "@/lib/types";
-import { AlertTriangle, Clock, MapPin, ShieldAlert } from "lucide-react";
+import { AlertTriangle, BrainCircuit, Clock, MapPin, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface RiskPanelProps {
   risks: RiskAssessment[];
   onSelect?: (cellId: string) => void;
+  onExplain?: (cellId: string) => void;
 }
 
-export function RiskPanel({ risks, onSelect }: RiskPanelProps) {
+export function RiskPanel({ risks, onSelect, onExplain }: RiskPanelProps) {
   // Sort risks by severity
   const sortedRisks = [...risks].sort((a, b) => {
     const levels = { severe: 4, high: 3, moderate: 2, low: 1 };
@@ -61,6 +62,7 @@ export function RiskPanel({ risks, onSelect }: RiskPanelProps) {
                   <span className="font-medium">ETA: {risk.eta_minutes} min to target</span>
                 </div>
               )}
+              <button onClick={(event) => { event.stopPropagation(); onExplain?.(risk.cell_id); }} className="mt-1 flex items-center gap-1 text-xs font-medium text-sky-300 hover:text-sky-100"><BrainCircuit className="h-3.5 w-3.5" /> Explain warning</button>
             </div>
           </div>
         ))}

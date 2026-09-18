@@ -1,14 +1,15 @@
 import { StormCell, RiskAssessment } from "@/lib/types";
-import { Zap, Wind, Navigation, Activity, X } from "lucide-react";
+import { Zap, Wind, Navigation, Activity, BrainCircuit, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface StormDetailsProps {
   storm: StormCell | null;
   risk: RiskAssessment | null;
   onClose: () => void;
+  onExplain?: (cellId: string) => void;
 }
 
-export function StormDetails({ storm, risk, onClose }: StormDetailsProps) {
+export function StormDetails({ storm, risk, onClose, onExplain }: StormDetailsProps) {
   if (!storm) return null;
 
   const getIntensityColor = (intensity: string) => {
@@ -116,6 +117,12 @@ export function StormDetails({ storm, risk, onClose }: StormDetailsProps) {
           </div>
         </div>
       )}
+
+      <div className="border-t border-slate-700/50 p-3">
+        <button onClick={() => onExplain?.(storm.cell_id)} className="flex w-full items-center justify-center gap-2 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-semibold text-sky-100 transition hover:bg-sky-400/20">
+          <BrainCircuit className="h-4 w-4" /> Explain warning
+        </button>
+      </div>
     </div>
   );
 }
