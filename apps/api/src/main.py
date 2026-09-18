@@ -84,7 +84,7 @@ async def run_nowcasting_pipeline():
 
             # 6. Report model inference health
             latency_ms = int((time.time() - start) * 1000)
-            health_monitor.report_inference(latency_ms=latency_ms, model_version="persistence-v1")
+            health_monitor.report_inference(latency_ms=latency_ms, model_version="pytorch-deep-nowcaster-v2")
 
             # 7. Broadcast updates via WebSocket
             await ws_manager.broadcast("storm_update", {

@@ -67,19 +67,19 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
             type: 'heatmap',
             source: 'radar-grid',
             paint: {
-              'heatmap-weight': ['interpolate', ['linear'], ['get', 'dbz'], 10, 0.25, 30, 0.55, 50, 0.85, 70, 1.0],
-              'heatmap-intensity': 3.0,
+              'heatmap-weight': ['interpolate', ['linear'], ['get', 'weight'], 0, 0, 1, 1],
+              'heatmap-intensity': 2.5,
               'heatmap-color': [
                 'interpolate', ['linear'], ['heatmap-density'],
                 0.00, 'rgba(0, 0, 0, 0)',
-                0.10, 'rgba(6, 182, 212, 0.65)',  // Cyan (Drizzle 10-25 dBZ)
-                0.28, 'rgba(34, 197, 94, 0.80)',  // Bright Green (Light Rain 25-35 dBZ)
-                0.48, 'rgba(234, 179, 8, 0.90)',  // Yellow (Moderate Rain 35-45 dBZ)
-                0.68, 'rgba(249, 115, 22, 0.98)', // Orange (Heavy Rain 45-55 dBZ)
-                0.85, 'rgba(239, 68, 68, 1.00)',  // Crimson Red (Severe Storm 55-65 dBZ)
+                0.08, 'rgba(6, 182, 212, 0.65)',  // Cyan (Drizzle 10-25 dBZ)
+                0.25, 'rgba(34, 197, 94, 0.82)',  // Bright Green (Light Rain 25-35 dBZ)
+                0.45, 'rgba(234, 179, 8, 0.92)',  // Yellow (Moderate Rain 35-45 dBZ)
+                0.65, 'rgba(249, 115, 22, 0.98)', // Orange (Heavy Rain 45-55 dBZ)
+                0.82, 'rgba(239, 68, 68, 1.00)',  // Crimson Red (Severe Storm 55-65 dBZ)
                 1.00, 'rgba(217, 70, 239, 1.00)'  // Magenta (Extreme Hail >65 dBZ)
               ],
-              'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 35, 8, 70, 12, 140],
+              'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 45, 8, 85, 12, 160],
               'heatmap-opacity': 0.85
             }
           }
@@ -102,7 +102,10 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
           if (radarData && radarData.points && map.current) {
             const radarFeatures = radarData.points.map((p: any) => ({
               type: 'Feature',
-              properties: { dbz: p.dbz },
+              properties: {
+                dbz: p.dbz,
+                weight: Math.min(1.0, Math.max(0.1, (p.dbz - 10) / 55.0))
+              },
               geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
             }));
             const rSource = map.current.getSource('radar-grid') as maplibregl.GeoJSONSource;
@@ -232,6 +235,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       if (!marker) {
         const el = document.createElement('div');
         el.className = 'storm-marker-node cursor-pointer group flex flex-col items-center select-none z-20';
+        el.style.transition = 'transform 0.8s cubic-bezier(0.25, 1, 0.5, 1), left 0.8s, top 0.8s';
         
         el.innerHTML = `
           <div class="relative flex items-center justify-center">
@@ -259,6 +263,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       } else {
         marker.setLngLat([lon, lat]);
         const el = marker.getElement();
+        el.style.transition = 'transform 0.8s cubic-bezier(0.25, 1, 0.5, 1), left 0.8s, top 0.8s';
         const core = el.querySelector('.marker-core');
         if (core) {
           if (isSelected) {
@@ -319,7 +324,10 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
           if (radarData && radarData.points && map.current) {
             const radarFeatures = radarData.points.map((p: any) => ({
               type: 'Feature',
-              properties: { dbz: p.dbz },
+              properties: {
+                dbz: p.dbz,
+                weight: Math.min(1.0, Math.max(0.1, (p.dbz - 10) / 55.0))
+              },
               geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
             }));
             const rSource = map.current.getSource('radar-grid') as maplibregl.GeoJSONSource;
@@ -332,6 +340,8 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
     };
 
     updateRadar();
+    const interval = setInterval(updateRadar, 2000);
+    return () => clearInterval(interval);
   }, [data]);
 
   return (

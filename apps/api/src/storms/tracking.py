@@ -6,6 +6,7 @@ Uses 30-minute moving window averaging for steady, non-fluctuating trajectory pr
 import numpy as np
 from typing import Optional
 from src.config import settings
+from src.ml.inference import ml_inference
 
 
 class StormTracker:
@@ -126,10 +127,17 @@ class StormTracker:
                 else:
                     trend = "steady"
 
+                # Coordinate EMA smoothing to eliminate discrete 1-km grid step quantization jumps
+                smooth_alpha = 0.35
+                smoothed_lat = prev["center_lat"] + smooth_alpha * (det["center_lat"] - prev["center_lat"])
+                smoothed_lon = prev["center_lon"] + smooth_alpha * (det["center_lon"] - prev["center_lon"])
+
                 tracked_cell = {
                     **det,
                     "cell_id": cell_id,
                     "timestamp": timestamp,
+                    "center_lat": round(float(smoothed_lat), 4),
+                    "center_lon": round(float(smoothed_lon), 4),
                     "movement_speed_kmh": round(max(5.0, speed_kmh), 1),
                     "movement_direction_deg": round(direction_deg, 1),
                     "velocity_y": smoothed_vy,
@@ -175,55 +183,52 @@ class StormTracker:
 
     def predict_trajectories(self, horizons_minutes: list[int] = None) -> list[dict]:
         """
-        Predict average storm trajectories over a 30-minute historical time window.
-        Computes the ensemble mean vector and future coordinates.
+        Predict storm trajectories using the PyTorch Deep Neural Nowcaster.
+        Falls back to 30-minute EMA velocity extrapolation if PyTorch model is uninitialized.
         """
         if horizons_minutes is None:
             horizons_minutes = [15, 30, 45, 60]
 
-        resolution_km = settings.mvp_grid_resolution_km
-        time_step = settings.mvp_time_step_minutes
         trajectories = []
 
         for cell_id, cell in self._active_cells.items():
-            # Use 30-minute smoothed velocity vector
-            vx, vy = self._smoothed_velocities.get(cell_id, (cell.get("velocity_x", 0.6), cell.get("velocity_y", -0.3)))
+            history = self._history_buffers.get(cell_id, [])
+            
+            try:
+                # Primary: High-Accuracy PyTorch Neural Nowcasting
+                ml_res = ml_inference.predict_cell_nowcast(cell, history, horizons_minutes)
+                forecasts = ml_res["forecasts"]
+                trajectory_coords = ml_res["trajectory_coords"]
+                smoothing_model = ml_res["smoothing_model"]
+            except Exception as e:
+                # Fallback: Smoothed Linear EMA Kinematic Extrapolation
+                resolution_km = settings.mvp_grid_resolution_km
+                time_step = settings.mvp_time_step_minutes
+                vx, vy = self._smoothed_velocities.get(cell_id, (cell.get("velocity_x", 0.6), cell.get("velocity_y", -0.3)))
+                
+                forecasts = []
+                for h in horizons_minutes:
+                    steps = h / time_step
+                    pred_y = cell["centroid_y"] + vy * steps
+                    pred_x = cell["centroid_x"] + vx * steps
 
-            # If velocity vector is weak, derive from direction and speed
-            if abs(vy) < 0.05 and abs(vx) < 0.05:
-                speed_kmh = cell.get("movement_speed_kmh", 15.0)
-                direction_deg = cell.get("movement_direction_deg", 45.0)
-                rad = np.radians(direction_deg)
-                km_per_step = speed_kmh * (time_step / 60.0)
-                grid_dist = km_per_step / resolution_km
-                vx = grid_dist * np.sin(rad)
-                vy = -grid_dist * np.cos(rad)
+                    pred_lat = settings.mvp_center_lat + (pred_y - settings.grid_height / 2) * (resolution_km / 111.0)
+                    pred_lon = settings.mvp_center_lon + (pred_x - settings.grid_width / 2) * (resolution_km / 111.0)
+                    uncertainty_km = 4 + (h / 10) * 2.5
 
-            forecasts = []
-            for h in horizons_minutes:
-                steps = h / time_step
-                pred_y = cell["centroid_y"] + vy * steps
-                pred_x = cell["centroid_x"] + vx * steps
+                    forecasts.append({
+                        "horizon_minutes": h,
+                        "predicted_lat": round(float(pred_lat), 4),
+                        "predicted_lon": round(float(pred_lon), 4),
+                        "uncertainty_km": round(uncertainty_km, 1),
+                        "thunderstorm_probability": round(max(0.3, 1.0 - h * 0.008), 2),
+                        "lightning_probability": round(max(0.2, 0.9 - h * 0.01), 2),
+                    })
 
-                pred_lat = settings.mvp_center_lat + (pred_y - settings.grid_height / 2) * (resolution_km / 111.0)
-                pred_lon = settings.mvp_center_lon + (pred_x - settings.grid_width / 2) * (resolution_km / 111.0)
-
-                uncertainty_km = 4 + (h / 10) * 2.5
-
-                forecasts.append({
-                    "horizon_minutes": h,
-                    "predicted_lat": round(float(pred_lat), 4),
-                    "predicted_lon": round(float(pred_lon), 4),
-                    "uncertainty_km": round(uncertainty_km, 1),
-                    "thunderstorm_probability": round(max(0.3, 1.0 - h * 0.008), 2),
-                    "lightning_probability": round(max(0.2, 0.9 - h * 0.01), 2),
-                })
-
-            trajectory_coords = [
-                [cell["center_lon"], cell["center_lat"]]
-            ] + [
-                [f["predicted_lon"], f["predicted_lat"]] for f in forecasts
-            ]
+                trajectory_coords = [[cell["center_lon"], cell["center_lat"]]] + [
+                    [f["predicted_lon"], f["predicted_lat"]] for f in forecasts
+                ]
+                smoothing_model = "Linear-EMA-Fallback"
 
             trajectories.append({
                 "cell_id": cell_id,
@@ -233,7 +238,7 @@ class StormTracker:
                 "direction_deg": cell.get("movement_direction_deg", 45.0),
                 "intensity": cell.get("intensity", "strong"),
                 "trend": cell.get("trend", "steady"),
-                "smoothing_window": "30-min EMA",
+                "smoothing_window": smoothing_model,
                 "forecasts": forecasts,
                 "trajectory_coords": trajectory_coords,
             })
