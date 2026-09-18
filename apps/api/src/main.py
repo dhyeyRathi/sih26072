@@ -190,7 +190,7 @@ async def get_current_radar():
     for y in range(0, h, step):
         for x in range(0, w, step):
             val = float(grid[y, x])
-            if val > 15:
+            if val > 10:
                 lat = settings.mvp_center_lat + (y - h / 2) * (settings.mvp_grid_resolution_km / 111.0)
                 lon = settings.mvp_center_lon + (x - w / 2) * (settings.mvp_grid_resolution_km / 111.0)
                 significant_points.append({

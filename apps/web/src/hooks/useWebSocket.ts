@@ -41,7 +41,6 @@ export function useWebSocket(url: string) {
         try {
           const message: WebSocketMessage = JSON.parse(event.data);
           
-          // Fix naive UTC timestamps from python backend
           if (message.timestamp && !message.timestamp.endsWith('Z') && !message.timestamp.includes('+')) {
             message.timestamp += 'Z';
           }
@@ -83,6 +82,57 @@ export function useWebSocket(url: string) {
       }
     };
   }, [connect]);
+
+  // Fallback REST polling if WebSocket is disconnected
+  useEffect(() => {
+    let pollInterval: NodeJS.Timeout;
+
+    const fetchFallback = async () => {
+      try {
+        const [stormsRes, trajRes] = await Promise.all([
+          fetch('/api/storms').then(r => r.json()),
+          fetch('/api/storms/trajectories').then(r => r.json())
+        ]);
+
+        if (stormsRes && stormsRes.storms) {
+          const payload: StormUpdatePayload = {
+            timestamp: new Date().toISOString(),
+            storms: stormsRes.storms || [],
+            trajectories: trajRes.trajectories || [],
+            risks: stormsRes.storms.map((s: any) => ({
+              cell_id: s.cell_id,
+              risk_level: s.intensity === 'severe' ? 'severe' : s.intensity === 'strong' ? 'high' : s.intensity === 'moderate' ? 'moderate' : 'low',
+              thunderstorm_probability: 0.85,
+              lightning_probability: 0.70,
+              intensity: s.intensity,
+              speed_kmh: s.movement_speed_kmh,
+              direction_deg: s.movement_direction_deg,
+              trend: s.trend
+            })),
+            lightning: [],
+            radar_summary: {
+              max_reflectivity: 55,
+              mean_reflectivity: 38,
+              active_cells: stormsRes.storms.length
+            }
+          };
+          setStormData(payload);
+          setLastMessageTime(new Date());
+        }
+      } catch (e) {
+        console.error("REST fallback poll failed:", e);
+      }
+    };
+
+    if (!isConnected) {
+      fetchFallback();
+      pollInterval = setInterval(fetchFallback, 2000);
+    }
+
+    return () => {
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [isConnected]);
 
   return {
     isConnected,

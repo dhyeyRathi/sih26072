@@ -19,7 +19,7 @@ export function RiskPanel({ risks, onSelect }: RiskPanelProps) {
   if (highRisks.length === 0) return null;
 
   return (
-    <div className="absolute top-6 left-6 w-80 bg-[#0a0e27]/90 backdrop-blur-xl border border-slate-700/50 rounded-xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="absolute top-4 left-4 w-80 bg-[#0a0e27]/90 backdrop-blur-xl border border-slate-700/50 rounded-xl shadow-2xl overflow-hidden flex flex-col z-30">
       <div className="bg-red-500/10 border-b border-red-500/20 p-4">
         <div className="flex items-center gap-2 text-red-400 font-bold">
           <ShieldAlert className="w-5 h-5" />
@@ -27,12 +27,12 @@ export function RiskPanel({ risks, onSelect }: RiskPanelProps) {
         </div>
       </div>
 
-      <div className="max-h-96 overflow-y-auto p-4 space-y-4">
+      <div className="max-h-96 overflow-y-auto p-4 space-y-3">
         {highRisks.map((risk) => (
           <div 
             key={risk.cell_id} 
             onClick={() => onSelect?.(risk.cell_id)}
-            className="bg-slate-800/50 rounded-lg p-3 border border-slate-700/50 cursor-pointer hover:bg-slate-700/50 hover:border-slate-500/50 transition-all"
+            className="bg-slate-800/60 rounded-lg p-3 border border-slate-700/60 cursor-pointer hover:bg-slate-700/60 hover:border-slate-500/60 transition-all shadow-md"
           >
             <div className="flex justify-between items-start mb-2">
               <div className="font-semibold text-white">Storm {risk.cell_id}</div>

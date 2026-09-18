@@ -21,7 +21,7 @@ export function StormDetails({ storm, risk, onClose }: StormDetailsProps) {
   };
 
   return (
-    <div className="absolute top-6 right-6 w-80 bg-[#0a0e27]/90 backdrop-blur-xl border border-slate-700/50 rounded-xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="absolute top-4 right-4 w-80 bg-[#0a0e27]/90 backdrop-blur-xl border border-slate-700/50 rounded-xl shadow-2xl overflow-hidden flex flex-col z-30">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-slate-700/50">
         <div>
@@ -100,10 +100,10 @@ export function StormDetails({ storm, risk, onClose }: StormDetailsProps) {
                 />
               </div>
             </div>
-            
+
             <div>
               <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-300">Lightning</span>
+                <span className="text-slate-300">Lightning Strike</span>
                 <span className="font-mono text-white">{(risk.lightning_probability * 100).toFixed(0)}%</span>
               </div>
               <div className="h-1.5 w-full bg-slate-700 rounded-full overflow-hidden">

@@ -14,13 +14,18 @@ interface WeatherMapProps {
 export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStormId }: WeatherMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
-  const [mapLoaded, setMapLoaded] = useState(false);
+  const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
 
-  // Initialize Map
+  const [svgOverlay, setSvgOverlay] = useState<{
+    polylines: Array<{ cellId: string; points: string; color: string }>;
+    nodes: Array<{ x: number; y: number; label: string; color: string }>;
+  }>({ polylines: [], nodes: [] });
+
+  // Initialize Map Instance
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
-    map.current = new maplibregl.Map({
+    const instance = new maplibregl.Map({
       container: mapContainer.current,
       style: {
         version: 8,
@@ -40,9 +45,6 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
             ],
             tileSize: 256
           },
-          'storm-cells': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-          'storm-trajectories': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-          'lightning-strikes': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
           'radar-grid': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } }
         },
         layers: [
@@ -65,106 +67,238 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
             type: 'heatmap',
             source: 'radar-grid',
             paint: {
-              'heatmap-weight': ['interpolate', ['linear'], ['get', 'dbz'], 15, 0.1, 40, 0.5, 70, 1.0],
-              'heatmap-intensity': 1.2,
+              'heatmap-weight': ['interpolate', ['linear'], ['get', 'dbz'], 10, 0.25, 30, 0.55, 50, 0.85, 70, 1.0],
+              'heatmap-intensity': 3.0,
               'heatmap-color': [
                 'interpolate', ['linear'], ['heatmap-density'],
-                0, 'rgba(0, 0, 0, 0)',
-                0.2, 'rgba(59, 130, 246, 0.4)',
-                0.4, 'rgba(34, 197, 94, 0.5)',
-                0.6, 'rgba(234, 179, 8, 0.6)',
-                0.8, 'rgba(249, 115, 22, 0.7)',
-                1.0, 'rgba(239, 68, 68, 0.8)'
+                0.00, 'rgba(0, 0, 0, 0)',
+                0.10, 'rgba(6, 182, 212, 0.65)',  // Cyan (Drizzle 10-25 dBZ)
+                0.28, 'rgba(34, 197, 94, 0.80)',  // Bright Green (Light Rain 25-35 dBZ)
+                0.48, 'rgba(234, 179, 8, 0.90)',  // Yellow (Moderate Rain 35-45 dBZ)
+                0.68, 'rgba(249, 115, 22, 0.98)', // Orange (Heavy Rain 45-55 dBZ)
+                0.85, 'rgba(239, 68, 68, 1.00)',  // Crimson Red (Severe Storm 55-65 dBZ)
+                1.00, 'rgba(217, 70, 239, 1.00)'  // Magenta (Extreme Hail >65 dBZ)
               ],
-              'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 10, 9, 25, 14, 50],
-              'heatmap-opacity': 0.8
-            }
-          },
-          {
-            id: 'trajectories-layer',
-            type: 'line',
-            source: 'storm-trajectories',
-            paint: {
-              'line-color': ['get', 'color'],
-              'line-width': 2,
-              'line-dasharray': [2, 2],
-            }
-          },
-          {
-            id: 'storm-cells-layer',
-            type: 'circle',
-            source: 'storm-cells',
-            paint: {
-              'circle-radius': ['get', 'radius_px'],
-              'circle-color': ['get', 'color'],
-              'circle-opacity': 0.6,
-              'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 3, 1],
-              'circle-stroke-color': '#ffffff'
-            }
-          },
-          {
-            id: 'lightning-layer',
-            type: 'circle',
-            source: 'lightning-strikes',
-            paint: {
-              'circle-radius': 4,
-              'circle-color': '#fbbf24',
-              'circle-opacity': 0.8,
-              'circle-blur': 0.5,
+              'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 35, 8, 70, 12, 140],
+              'heatmap-opacity': 0.85
             }
           }
         ]
       },
-      center: [72.5714, 23.0225], // Ahmedabad
-      zoom: 8,
-      pitch: 45,
+      center: [72.85, 23.0],
+      zoom: 8.5,
+      pitch: 25,
       bearing: 0,
-      antialias: true,
+      antialias: true
     });
 
-    map.current.on('style.load', () => {
-      setMapLoaded(true);
-    });
+    map.current = instance;
 
-    // Interactivity
-    map.current.on('click', 'storm-cells-layer', (e) => {
-      if (e.features && e.features.length > 0) {
-        const cellId = e.features[0].properties.cell_id;
-        onStormSelect(cellId);
-      }
-    });
+    // Fetch initial radar grid immediately on style ready
+    const fetchInitialRadar = () => {
+      fetch('/api/radar/current')
+        .then(res => res.json())
+        .then(radarData => {
+          if (radarData && radarData.points && map.current) {
+            const radarFeatures = radarData.points.map((p: any) => ({
+              type: 'Feature',
+              properties: { dbz: p.dbz },
+              geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
+            }));
+            const rSource = map.current.getSource('radar-grid') as maplibregl.GeoJSONSource;
+            if (rSource) {
+              rSource.setData({ type: 'FeatureCollection', features: radarFeatures as any });
+            }
+          }
+        })
+        .catch(err => console.error("Failed to fetch initial radar grid:", err));
+    };
 
-    map.current.on('mouseenter', 'storm-cells-layer', () => {
-      if (map.current) map.current.getCanvas().style.cursor = 'pointer';
-    });
+    instance.on('load', fetchInitialRadar);
+    instance.on('styledata', fetchInitialRadar);
 
-    map.current.on('mouseleave', 'storm-cells-layer', () => {
-      if (map.current) map.current.getCanvas().style.cursor = '';
-    });
-
-    // Deselect when clicking outside
-    map.current.on('click', (e) => {
-      const features = map.current?.queryRenderedFeatures(e.point, { layers: ['storm-cells-layer'] });
-      if (!features || features.length === 0) {
-        onStormSelect(null);
-      }
+    instance.on('click', () => {
+      onStormSelect(null);
     });
 
     return () => {
-      map.current?.remove();
+      Object.values(markersRef.current).forEach(m => m.remove());
+      markersRef.current = {};
+      instance.remove();
       map.current = null;
     };
   }, []);
 
-  // Fly to selected storm (Only on explicit click, not on every data tick)
+  // Update SVG Trajectory Line Projections on Map Move/Zoom
+  const syncSvgOverlay = () => {
+    if (!map.current || !data || !data.trajectories) return;
+
+    const polylines: Array<{ cellId: string; points: string; color: string }> = [];
+    const nodes: Array<{ x: number; y: number; label: string; color: string }> = [];
+
+    data.trajectories.forEach(traj => {
+      let color = '#3b82f6';
+      const risk = data.risks.find(r => r.cell_id === traj.cell_id);
+      if (risk) {
+        if (risk.risk_level === 'moderate') color = '#eab308';
+        if (risk.risk_level === 'high') color = '#f97316';
+        if (risk.risk_level === 'severe') color = '#ef4444';
+      }
+
+      const coords = traj.trajectory_coords || [[traj.current_lon, traj.current_lat]];
+      const pts = coords.map(c => {
+        const p = map.current!.project([c[0], c[1]]);
+        return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+      });
+
+      if (pts.length > 1) {
+        polylines.push({
+          cellId: traj.cell_id,
+          color,
+          points: pts.join(' ')
+        });
+      }
+
+      if (traj.forecasts) {
+        traj.forecasts.forEach(f => {
+          const p = map.current!.project([f.predicted_lon, f.predicted_lat]);
+          nodes.push({
+            x: p.x,
+            y: p.y,
+            label: `+${f.horizon_minutes}m`,
+            color
+          });
+        });
+      }
+    });
+
+    setSvgOverlay({ polylines, nodes });
+  };
+
+  useEffect(() => {
+    if (!map.current) return;
+    const m = map.current;
+    m.on('move', syncSvgOverlay);
+    m.on('zoom', syncSvgOverlay);
+    m.on('pitch', syncSvgOverlay);
+
+    syncSvgOverlay();
+
+    return () => {
+      m.off('move', syncSvgOverlay);
+      m.off('zoom', syncSvgOverlay);
+      m.off('pitch', syncSvgOverlay);
+    };
+  }, [data, forecastHorizon]);
+
+  // HTML Markers Sync for Storm Cell Nodes
+  useEffect(() => {
+    if (!map.current || !data) return;
+
+    const currentCellIds = new Set(data.storms.map(s => s.cell_id));
+
+    // Remove markers no longer present
+    Object.keys(markersRef.current).forEach(cellId => {
+      if (!currentCellIds.has(cellId)) {
+        markersRef.current[cellId].remove();
+        delete markersRef.current[cellId];
+      }
+    });
+
+    // Create or update HTML markers
+    data.storms.forEach(storm => {
+      const isSelected = storm.cell_id === selectedStormId;
+      let lat = storm.center_lat;
+      let lon = storm.center_lon;
+
+      if (forecastHorizon > 0) {
+        const traj = data.trajectories.find(t => t.cell_id === storm.cell_id);
+        if (traj && traj.forecasts) {
+          const fc = traj.forecasts.find(f => f.horizon_minutes === forecastHorizon);
+          if (fc) {
+            lat = fc.predicted_lat;
+            lon = fc.predicted_lon;
+          }
+        }
+      }
+
+      let color = '#3b82f6';
+      if (storm.intensity === 'moderate') color = '#eab308';
+      if (storm.intensity === 'strong') color = '#f97316';
+      if (storm.intensity === 'severe') color = '#ef4444';
+
+      let marker = markersRef.current[storm.cell_id];
+
+      if (!marker) {
+        const el = document.createElement('div');
+        el.className = 'storm-marker-node cursor-pointer group flex flex-col items-center select-none z-20';
+        
+        el.innerHTML = `
+          <div class="relative flex items-center justify-center">
+            <span class="pulse-ring absolute w-10 h-10 rounded-full opacity-75 animate-ping" style="background-color: ${color};"></span>
+            <div class="marker-core w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white shadow-xl border-2 border-white transition-all group-hover:scale-125" style="background-color: ${color};">
+              ⚡
+            </div>
+          </div>
+          <div class="marker-label mt-1 px-2 py-0.5 rounded-md bg-slate-900/90 text-white text-[11px] font-semibold border border-slate-700/80 shadow-lg backdrop-blur whitespace-nowrap flex items-center gap-1">
+            <span>${storm.cell_id}</span>
+            <span style="color: ${color}; font-weight: 700;">• ${storm.max_reflectivity_dbz.toFixed(0)} dBZ</span>
+          </div>
+        `;
+
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          onStormSelect(storm.cell_id);
+        });
+
+        marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([lon, lat])
+          .addTo(map.current);
+
+        markersRef.current[storm.cell_id] = marker;
+      } else {
+        marker.setLngLat([lon, lat]);
+        const el = marker.getElement();
+        const core = el.querySelector('.marker-core');
+        if (core) {
+          if (isSelected) {
+            core.className = 'marker-core w-10 h-10 rounded-full flex items-center justify-center text-[14px] font-bold text-white shadow-2xl border-4 border-amber-400 scale-110 transition-all';
+          } else {
+            core.className = 'marker-core w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white shadow-xl border-2 border-white transition-all group-hover:scale-125';
+          }
+        }
+      }
+    });
+
+    syncSvgOverlay();
+  }, [data, forecastHorizon, selectedStormId]);
+
+  // Camera flyTo on storm selection
   const lastSelectedId = useRef<string | null>(null);
   useEffect(() => {
-    if (mapLoaded && map.current && data && selectedStormId && selectedStormId !== lastSelectedId.current) {
+    if (map.current && selectedStormId && selectedStormId !== lastSelectedId.current) {
       lastSelectedId.current = selectedStormId;
-      const storm = data.storms.find(s => s.cell_id === selectedStormId);
-      if (storm) {
+      
+      let storm = data?.storms.find(s => s.cell_id === selectedStormId);
+      let targetLat = storm?.center_lat;
+      let targetLon = storm?.center_lon;
+
+      if (!targetLat || !targetLon) {
+        fetch(`/api/storms/${selectedStormId}`)
+          .then(res => res.json())
+          .then(detail => {
+            if (detail && detail.cell && map.current) {
+              map.current.flyTo({
+                center: [detail.cell.center_lon, detail.cell.center_lat],
+                zoom: 10,
+                essential: true
+              });
+            }
+          })
+          .catch(e => console.error(e));
+      } else {
         map.current.flyTo({
-          center: [storm.center_lon, storm.center_lat],
+          center: [targetLon, targetLat],
           zoom: 10,
           essential: true
         });
@@ -172,131 +306,109 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
     } else if (!selectedStormId) {
       lastSelectedId.current = null;
     }
-  }, [selectedStormId, mapLoaded]); // removed data from deps so it doesn't pan every 2s
+  }, [selectedStormId, data]);
 
-  // Update Data Layers safely
+  // Continuously Update Radar Grid Heatmap Data Source
   useEffect(() => {
-    if (!mapLoaded || !map.current || !data) return;
+    if (!map.current) return;
 
-    try {
-      // 1. Storm Cells
-      const cellFeatures = data.storms.map(storm => {
-        const isSelected = storm.cell_id === selectedStormId;
-        let lat = storm.center_lat;
-        let lon = storm.center_lon;
-
-        if (forecastHorizon > 0) {
-          const traj = data.trajectories.find(t => t.cell_id === storm.cell_id);
-          if (traj && traj.forecasts) {
-            const fc = traj.forecasts.find(f => f.horizon_minutes === forecastHorizon);
-            if (fc) {
-              lat = fc.predicted_lat;
-              lon = fc.predicted_lon;
-            }
-          }
-        }
-
-        let color = '#3b82f6';
-        if (storm.intensity === 'moderate') color = '#eab308';
-        if (storm.intensity === 'strong') color = '#f97316';
-        if (storm.intensity === 'severe') color = '#ef4444';
-
-        return {
-          type: 'Feature',
-          properties: { 
-            cell_id: storm.cell_id,
-            selected: isSelected,
-            color,
-            radius_px: 15, // Hardcoded fallback just in case
-            intensity: storm.intensity
-          },
-          geometry: {
-            type: 'Point',
-            coordinates: [lon, lat]
-          }
-        };
-      });
-      const cellsSource = map.current.getSource('storm-cells') as maplibregl.GeoJSONSource;
-      cellsSource?.setData({ type: 'FeatureCollection', features: cellFeatures as any });
-    } catch (e) { console.error('Storm cells error', e); }
-
-    try {
-      // 2. Trajectories
-      const trajectoryFeatures = data.trajectories
-        .filter(traj => traj.forecasts && traj.forecasts.length > 0)
-        .map(traj => {
-          const coords = [[traj.current_lon, traj.current_lat]];
-          traj.forecasts.forEach(f => {
-            coords.push([f.predicted_lon, f.predicted_lat]);
-          });
-          
-          let color = '#94a3b8';
-          const risk = data.risks.find(r => r.cell_id === traj.cell_id);
-          if (risk) {
-            if (risk.risk_level === 'moderate') color = '#eab308';
-            if (risk.risk_level === 'high') color = '#f97316';
-            if (risk.risk_level === 'severe') color = '#ef4444';
-          }
-          
-          return {
-            type: 'Feature',
-            properties: { cell_id: traj.cell_id, color },
-            geometry: { type: 'LineString', coordinates: coords }
-          };
-        });
-      const tSource = map.current.getSource('storm-trajectories') as maplibregl.GeoJSONSource;
-      tSource?.setData({ type: 'FeatureCollection', features: trajectoryFeatures as any });
-    } catch (e) { console.error('Trajectories error', e); }
-
-    try {
-      // 3. Lightning Strikes
-      if (forecastHorizon === 0 && data.lightning) {
-        const lightningFeatures = data.lightning.map(strike => ({
-          type: 'Feature',
-          properties: { intensity: strike.intensity_ka },
-          geometry: { type: 'Point', coordinates: [strike.lon, strike.lat] }
-        }));
-        const lSource = map.current.getSource('lightning-strikes') as maplibregl.GeoJSONSource;
-        lSource?.setData({ type: 'FeatureCollection', features: lightningFeatures as any });
-      } else {
-        const lSource = map.current.getSource('lightning-strikes') as maplibregl.GeoJSONSource;
-        lSource?.setData({ type: 'FeatureCollection', features: [] });
-      }
-    } catch (e) { console.error('Lightning error', e); }
-
-    try {
-      // 4. Raw Radar Grid Heatmap
+    const updateRadar = () => {
       fetch('/api/radar/current')
         .then(res => res.json())
         .then(radarData => {
-          if (radarData && radarData.points) {
+          if (radarData && radarData.points && map.current) {
             const radarFeatures = radarData.points.map((p: any) => ({
               type: 'Feature',
               properties: { dbz: p.dbz },
               geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
             }));
-            const rSource = map.current?.getSource('radar-grid') as maplibregl.GeoJSONSource;
-            rSource?.setData({ type: 'FeatureCollection', features: radarFeatures as any });
+            const rSource = map.current.getSource('radar-grid') as maplibregl.GeoJSONSource;
+            if (rSource) {
+              rSource.setData({ type: 'FeatureCollection', features: radarFeatures as any });
+            }
           }
         })
         .catch(err => console.error("Failed to fetch radar grid:", err));
-    } catch (e) { console.error('Radar fetch error', e); }
+    };
 
-  }, [data, forecastHorizon, selectedStormId, mapLoaded]);
+    updateRadar();
+  }, [data]);
 
   return (
-    <div className="w-full h-full absolute inset-0 z-0">
+    <div className="w-full h-full absolute inset-0 z-0 overflow-hidden">
+      {/* Map Canvas */}
       <div ref={mapContainer} className="w-full h-full absolute inset-0 z-0" />
-      
-      {/* Fallback Debug Overlay to prove React is computing the layers */}
-      {process.env.NODE_ENV === 'development' && data && (
-        <div className="absolute top-4 left-4 bg-black/80 text-green-400 p-2 text-xs font-mono rounded z-50 pointer-events-none">
-          Map Data Sync:<br/>
-          Storms: {data.storms.length}<br/>
-          Traj: {data.trajectories.length}<br/>
-          Horizon: {forecastHorizon}
+
+      {/* Trajectory Vector SVG Overlay */}
+      <svg className="w-full h-full absolute inset-0 pointer-events-none z-10 overflow-hidden">
+        <defs>
+          <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        </defs>
+
+        {/* Trajectory Polylines */}
+        {svgOverlay.polylines.map((line, idx) => (
+          <g key={line.cellId || idx}>
+            <polyline
+              points={line.points}
+              fill="none"
+              stroke={line.color}
+              strokeWidth="8"
+              strokeOpacity="0.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              filter="url(#glow)"
+            />
+            <polyline
+              points={line.points}
+              fill="none"
+              stroke={line.color}
+              strokeWidth="3.5"
+              strokeDasharray="6 4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </g>
+        ))}
+
+        {/* Horizon Dots & Time Labels */}
+        {svgOverlay.nodes.map((node, idx) => (
+          <g key={idx} transform={`translate(${node.x}, ${node.y})`}>
+            <circle r="5" fill={node.color} stroke="#ffffff" strokeWidth="2" />
+            <rect x="-14" y="-20" width="28" height="14" rx="3" fill="#0f172a" opacity="0.85" />
+            <text
+              x="0"
+              y="-10"
+              textAnchor="middle"
+              fill="#ffffff"
+              fontSize="9"
+              fontWeight="bold"
+              fontFamily="monospace"
+            >
+              {node.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+
+      {/* Radar dBZ Reflectivity Scale Legend */}
+      <div className="absolute bottom-6 left-6 bg-[#0a0e27]/90 backdrop-blur-md border border-slate-700/60 rounded-lg p-2.5 z-30 shadow-xl flex flex-col space-y-1.5 text-xs select-none">
+        <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+          <span>Doppler Radar (dBZ)</span>
+          <span className="text-emerald-400 font-mono text-[10px]">LIVE</span>
         </div>
-      )}
+        <div className="h-3 w-48 rounded overflow-hidden flex" style={{
+          background: 'linear-gradient(to right, rgba(6,182,212,0.8), rgba(34,197,94,0.9), rgba(234,179,8,0.95), rgba(249,115,22,1), rgba(239,68,68,1), rgba(217,70,239,1))'
+        }} />
+        <div className="flex justify-between text-[9px] font-mono text-slate-400 pt-0.5">
+          <span>10 (Drizzle)</span>
+          <span>35</span>
+          <span>50</span>
+          <span>70+ (Severe)</span>
+        </div>
+      </div>
     </div>
   );
 }
