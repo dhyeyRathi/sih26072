@@ -1,0 +1,7 @@
+
+__pycache__/
+*.py[cod]
+*.class
+apps/api/venv/
+.env
+apps/web/node_modules/

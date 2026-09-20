@@ -2,20 +2,25 @@
 Simulated weather data generator for development and demonstration.
 Generates realistic Doppler radar reflectivity, rain bands, lightning, and storm data for Gujarat/Ahmedabad region.
 Maintains 3 permanent storm systems with pinned geographical centers so markers NEVER jump or move erratically,
-while radar reflectivity, lightning, and telemetry update dynamically every 1 second.
+while radar reflectivity, lightning, and telemetry update dynamically every 1 second, modulated by real NWP (CAPE/Wind)
+and community lightning strike density.
 """
 
+import time
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from src.config import settings
+from src.ingestion.open_meteo import get_latest_conditions
+from src.ingestion.lightning_blitzortung import flash_density_rate
 
 
 class SimulatedDataGenerator:
     """
     Generates synthetic Doppler radar weather data that mimics real atmospheric reflectivity observations.
     Storm centers are pinned at realistic geographical locations in Gujarat.
-    Radar reflectivity, lightning strikes, and atmospheric properties evolve dynamically in real time.
+    Radar reflectivity, lightning strikes, and atmospheric properties evolve dynamically in real time,
+    informed by real Open-Meteo atmospheric metrics and Blitzortung lightning observations.
     """
 
     def __init__(self, seed: int = 42):
@@ -27,6 +32,13 @@ class SimulatedDataGenerator:
 
         self._storms: list[dict] = []
         self._time_step = 0
+        self._last_env_update = 0.0
+        self._cached_env_metrics = {
+            "cape_j_kg": 1500.0,
+            "wind_speed_kmh": 15.0,
+            "lightning_flash_rate": 2.0,
+            "source_status": "initialized"
+        }
         self._init_storms()
 
     def _init_storms(self):
@@ -83,30 +95,68 @@ class SimulatedDataGenerator:
                 "active": True,
             })
 
+    def _refresh_real_atmospheric_conditions(self):
+        """Fetch and cache live Open-Meteo & Blitzortung metrics every 10 minutes (600s)."""
+        now = time.time()
+        if now - self._last_env_update < 600.0:
+            return
+
+        try:
+            nwp = get_latest_conditions()
+            lightning = flash_density_rate(window_minutes=15)
+
+            self._cached_env_metrics = {
+                "cape_j_kg": float(nwp.get("cape_j_kg", 1200.0)),
+                "wind_speed_kmh": float(nwp.get("wind_speed_kmh", 12.0)),
+                "relative_humidity_pct": float(nwp.get("relative_humidity_pct", 65.0)),
+                "lightning_flash_rate": float(lightning.get("rate_per_minute", 0.0)),
+                "source_status": "real-data-informed"
+            }
+            self._last_env_update = now
+        except Exception as e:
+            print(f"[WARN] Failed to refresh environmental metrics in simulator: {e}")
+
     def generate_radar_frame(self, timestamp: Optional[datetime] = None) -> dict:
         """
         Generate a single radar reflectivity frame (200x200 grid).
         Storm centers stay fixed at their anchor positions (zero marker drift).
-        Radar core reflectivity and rain bands dynamically pulse every 1 second.
+        Radar core reflectivity and rain bands dynamically pulse every 1 second,
+        modulated by real CAPE, wind, and lightning observations.
         """
         self._time_step += 1
+        self._refresh_real_atmospheric_conditions()
+
+        # Environmental modifiers from real data
+        cape = self._cached_env_metrics.get("cape_j_kg", 1500.0)
+        wind = self._cached_env_metrics.get("wind_speed_kmh", 15.0)
+        real_lt_rate = self._cached_env_metrics.get("lightning_flash_rate", 0.0)
+
+        # CAPE modulation: baseline 1000 J/kg; ±4 dBZ modulation
+        cape_dbz_delta = np.clip((cape - 1000.0) / 400.0, -4.0, 4.0)
+        # Wind expansion: higher wind expands rain envelope slightly
+        radius_modifier = np.clip((wind - 10.0) * 0.15, -2.0, 3.0)
+
         grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
         active_storms = []
         for storm in self._storms:
-            # Dynamic natural intensity fluctuation (reflectivity breathing +/- 1.5 dBZ)
+            # Dynamic natural intensity fluctuation + real atmospheric modulation
             pulse = float(np.sin(self._time_step * 0.15) * 1.5 + self.rng.uniform(-0.5, 0.5))
-            current_dbz = float(np.clip(storm["base_dbz"] + pulse, 35.0, 72.0))
+            current_dbz = float(np.clip(storm["base_dbz"] + pulse + cape_dbz_delta, 35.0, 72.0))
             storm["max_dbz"] = current_dbz
 
-            # Dynamic natural lightning rate fluctuation
-            storm["lightning_rate"] = float(np.clip(
-                (current_dbz - 38.0) * 1.2 + self.rng.uniform(-2.0, 2.0), 5.0, 45.0
-            ))
+            # Modulate lightning: blend synthetic baseline with real observed lightning rate
+            sim_rate = (current_dbz - 38.0) * 1.2 + self.rng.uniform(-2.0, 2.0)
+            if real_lt_rate > 0:
+                blended_rate = 0.7 * sim_rate + 0.3 * (real_lt_rate * 5.0)
+            else:
+                blended_rate = sim_rate
+            storm["lightning_rate"] = float(np.clip(blended_rate, 5.0, 48.0))
 
             cy = int(round(storm["center_y"]))
             cx = int(round(storm["center_x"]))
-            r = int(round(storm["radius"]))
+            effective_radius = max(8.0, storm["radius"] + radius_modifier)
+            r = int(round(effective_radius))
 
             # Draw smooth Gaussian storm core & rain envelope
             y_start = max(0, cy - r * 2)
@@ -118,10 +168,10 @@ class SimulatedDataGenerator:
                 for x in range(x_start, x_end):
                     dist = np.sqrt((y - storm["center_y"]) ** 2 + (x - storm["center_x"]) ** 2)
                     if dist < r * 2:
-                        intensity = current_dbz * np.exp(-(dist ** 2) / (2 * (r ** 2)))
+                        intensity = current_dbz * np.exp(-(dist ** 2) / (2 * (effective_radius ** 2)))
                         grid[y, x] = max(grid[y, x], intensity)
 
-            # Storm centers are permanently fixed to their designated geographic coordinates
+            # Storm centers remain permanently fixed to designated coordinates
             active_storms.append({
                 "cell_id": storm["id"],
                 "center_lat": storm["fixed_lat"],
@@ -132,21 +182,21 @@ class SimulatedDataGenerator:
                 "centroid_x": float(storm["center_x"]),
                 "radius_cells": int(r),
                 "max_reflectivity_dbz": round(current_dbz, 1),
-                "area_sq_km": round(float(np.pi * (storm["radius"] * settings.mvp_grid_resolution_km) ** 2), 1),
+                "area_sq_km": round(float(np.pi * (effective_radius * settings.mvp_grid_resolution_km) ** 2), 1),
                 "lightning_rate": round(float(storm["lightning_rate"]), 1),
                 "speed_kmh": round(float(storm["speed"]), 1),
                 "direction_deg": round(float(storm["heading"]), 1),
                 "velocity_y": float(storm["velocity_y"]),
                 "velocity_x": float(storm["velocity_x"]),
                 "intensity": self._classify_intensity(current_dbz),
-                "trend": "steady",
+                "trend": "intensifying" if cape_dbz_delta > 1.0 else "steady",
             })
 
         # Add light background noise (< 6 dBZ)
         noise = self.rng.uniform(0, 3, size=(self.grid_h, self.grid_w)).astype(np.float32)
         grid = np.clip(grid + noise, 0, 75)
 
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or datetime.now(timezone.utc)
 
         self._last_frame = {
             "grid": grid,
@@ -156,6 +206,13 @@ class SimulatedDataGenerator:
             "center_lat": self.center_lat,
             "center_lon": self.center_lon,
             "storms": active_storms,
+            "data_source": "real-data-informed radar proxy",
+            "environmental_telemetry": {
+                "observed_cape_j_kg": cape,
+                "surface_wind_kmh": wind,
+                "nwp_source": "Open-Meteo ECMWF/GFS Blend",
+                "lightning_proxy": "Blitzortung.org (Community/Non-Operational)"
+            }
         }
         return self._last_frame
 
