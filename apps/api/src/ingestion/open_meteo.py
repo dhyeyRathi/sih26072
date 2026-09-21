@@ -15,7 +15,7 @@ ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 # Cache conditions in-memory for 10 minutes (600s)
 _CONDITIONS_CACHE: Dict[str, Any] = {}
 _LAST_FETCH_TIME: float = 0.0
-CACHE_TTL_SECONDS: float = 600.0
+CACHE_TTL_SECONDS: float = 300.0  # Reduced from 600s for more responsive updates
 
 
 def get_latest_conditions(
@@ -45,9 +45,10 @@ def get_latest_conditions(
             "surface_pressure",
             "wind_speed_10m",
             "wind_direction_10m",
+            "wind_gusts_10m",
             "precipitation"
         ],
-        "hourly": ["cape"],
+        "hourly": ["cape", "wind_speed_80m", "wind_speed_120m", "wind_direction_80m", "wind_direction_120m"],
         "timezone": "auto",
         "forecast_days": 1
     }
@@ -73,11 +74,29 @@ def get_latest_conditions(
             "surface_pressure_hpa": float(current.get("surface_pressure", 1008.0)),
             "wind_speed_kmh": float(current.get("wind_speed_10m", 12.0)),
             "wind_direction_deg": float(current.get("wind_direction_10m", 220.0)),
+            "wind_gusts_kmh": float(current.get("wind_gusts_10m", 20.0)),
             "precipitation_mm": float(current.get("precipitation", 0.0)),
             "cape_j_kg": max(0.0, current_cape),
             "timestamp": current.get("time", ""),
             "status": "live"
         }
+
+        # Extract multi-level wind for shear estimation
+        wind_80m = hourly.get("wind_speed_80m", [])
+        wind_120m = hourly.get("wind_speed_120m", [])
+        wind_dir_80m = hourly.get("wind_direction_80m", [])
+        wind_dir_120m = hourly.get("wind_direction_120m", [])
+
+        # Wind shear = |V_upper - V_lower| (proxy for supercell potential)
+        if wind_80m and wind_120m:
+            ws_10 = conditions["wind_speed_kmh"]
+            ws_80 = float(wind_80m[0]) if wind_80m[0] is not None else ws_10
+            ws_120 = float(wind_120m[0]) if wind_120m[0] is not None else ws_80
+            conditions["wind_speed_80m_kmh"] = ws_80
+            conditions["wind_speed_120m_kmh"] = ws_120
+            conditions["wind_shear_0_120m_kmh"] = round(abs(ws_120 - ws_10), 1)
+        else:
+            conditions["wind_shear_0_120m_kmh"] = 0.0
 
         _CONDITIONS_CACHE = conditions
         _LAST_FETCH_TIME = now

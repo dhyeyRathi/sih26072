@@ -1,7 +1,8 @@
 """
-SIH26072 — Deep Neural Nowcaster ML Model Architecture
+SIH26072 — Deep Neural Nowcaster ML Model Architecture v3
 PyTorch multi-task neural network with residual connections, deeper layers,
-and MC Dropout support for storm cell trajectory and intensity nowcasting.
+expanded 18-feature input (including optical flow), and MC Dropout support
+for storm cell trajectory and intensity nowcasting.
 """
 
 import torch
@@ -35,16 +36,17 @@ class ResidualBlock(nn.Module):
 
 class StormNowcasterMLP(nn.Module):
     """
-    Multi-Task PyTorch Neural Network for Storm Cell Nowcasting.
+    Multi-Task PyTorch Neural Network for Storm Cell Nowcasting v3.
     
-    Architecture improvements over v1:
-    - Wider hidden dimension (256 vs 128) for more capacity
-    - Residual connections for better gradient flow
-    - 4 hidden layers (vs 3) for deeper feature extraction
+    Architecture improvements over v2:
+    - Expanded input: 18 features (vs 14) including optical flow velocity,
+      divergence, and curl for real-time storm dynamics
+    - Wider hidden dimension (320 vs 256) for more capacity
+    - 4 residual blocks (vs 3) for deeper feature extraction
     - MC Dropout (kept enabled during inference for ensemble averaging)
     
-    Inputs (Feature vector of length 14):
-    - [0-1]: Current velocity (vx, vy)
+    Inputs (Feature vector of length 18):
+    - [0-1]: Current velocity (vx, vy) from wind observations
     - [2-3]: Current acceleration (ax, ay)
     - [4]: Max reflectivity (dBZ)
     - [5]: Mean reflectivity (dBZ)
@@ -56,6 +58,9 @@ class StormNowcasterMLP(nn.Module):
     - [11]: Normalized Latitude offset from region center
     - [12]: Normalized Longitude offset from region center
     - [13]: Historical trajectory curvature (radians)
+    - [14-15]: Optical flow velocity at centroid (of_vx, of_vy)
+    - [16]: Optical flow divergence (convergence = intensification)
+    - [17]: Optical flow curl (rotation = mesocyclone)
     
     Outputs:
     - trajectory_offsets: (batch_size, 4, 2) -> (dx, dy) in grid units for 15, 30, 45, 60 min horizons
@@ -64,7 +69,7 @@ class StormNowcasterMLP(nn.Module):
     - lightning_probs: (batch_size, 4) -> calibrated lightning probability [0, 1]
     """
 
-    def __init__(self, input_dim: int = 14, hidden_dim: int = 256, mc_dropout: float = 0.1):
+    def __init__(self, input_dim: int = 18, hidden_dim: int = 320, mc_dropout: float = 0.1):
         super().__init__()
         self.mc_dropout_rate = mc_dropout
 
@@ -75,10 +80,11 @@ class StormNowcasterMLP(nn.Module):
             nn.SiLU(),
         )
 
-        # Deep feature extractor with residual blocks
+        # Deep feature extractor with 4 residual blocks
         self.res_block1 = ResidualBlock(hidden_dim, dropout=mc_dropout)
         self.res_block2 = ResidualBlock(hidden_dim, dropout=mc_dropout)
         self.res_block3 = ResidualBlock(hidden_dim, dropout=mc_dropout)
+        self.res_block4 = ResidualBlock(hidden_dim, dropout=mc_dropout)
 
         # Bottleneck
         self.bottleneck = nn.Sequential(
@@ -92,32 +98,34 @@ class StormNowcasterMLP(nn.Module):
 
         # 1. Non-linear Trajectory Prediction Head -> 4 horizons x 2 coords (dx, dy)
         self.trajectory_head = nn.Sequential(
-            nn.Linear(half_dim, 96),
+            nn.Linear(half_dim, 128),
             nn.SiLU(),
             nn.Dropout(p=mc_dropout),
-            nn.Linear(96, 4 * 2)
+            nn.Linear(128, 64),
+            nn.SiLU(),
+            nn.Linear(64, 4 * 2)
         )
 
         # 2. Reflectivity Intensity Forecasting Head -> 4 horizons
         self.intensity_head = nn.Sequential(
-            nn.Linear(half_dim, 48),
+            nn.Linear(half_dim, 64),
             nn.SiLU(),
-            nn.Linear(48, 4)
+            nn.Linear(64, 4)
         )
 
         # 3. Thunderstorm Probability Classifier Head -> 4 horizons
         self.ts_prob_head = nn.Sequential(
-            nn.Linear(half_dim, 48),
+            nn.Linear(half_dim, 64),
             nn.SiLU(),
-            nn.Linear(48, 4),
+            nn.Linear(64, 4),
             nn.Sigmoid()
         )
 
         # 4. Lightning Probability Classifier Head -> 4 horizons
         self.lt_prob_head = nn.Sequential(
-            nn.Linear(half_dim, 48),
+            nn.Linear(half_dim, 64),
             nn.SiLU(),
-            nn.Linear(48, 4),
+            nn.Linear(64, 4),
             nn.Sigmoid()
         )
 
@@ -129,6 +137,7 @@ class StormNowcasterMLP(nn.Module):
         h = self.res_block1(h)
         h = self.res_block2(h)
         h = self.res_block3(h)
+        h = self.res_block4(h)
         features = self.bottleneck(h)
 
         traj_out = self.trajectory_head(features).reshape(-1, 4, 2)

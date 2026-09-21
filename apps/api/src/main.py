@@ -23,9 +23,10 @@ from src.ingestion.satellite_gibs import get_satellite_tile_url
 from src.ingestion.open_meteo import get_latest_conditions
 from src.storms.detection import detect_storm_cells
 from src.storms.tracking import storm_tracker
-from src.risk.engine import assess_storm_risk
+from src.risk.engine import assess_storm_risk, enrich_storm_with_forecast_probs, AHMEDABAD_TARGET
 from src.health.monitor import health_monitor
 from src.exposure.infrastructure import assess_all_infrastructure
+from src.ml.optical_flow import optical_flow_engine
 
 # Import routers
 from src.storms.router import router as storms_router
@@ -51,6 +52,11 @@ async def run_nowcasting_pipeline():
     first_cycle = True
     while True:
         try:
+            # If no live dashboard sockets are connected, pause simulation to save resources
+            if not ws_manager.active_connections:
+                await asyncio.sleep(1)
+                continue
+
             start = time.time()
 
             # 1. Ingest data (informed by real atmospheric observations)
@@ -69,23 +75,39 @@ async def run_nowcasting_pipeline():
                 print(f"[PIPELINE RUNNING] Ingested Live Open-Meteo CAPE: {telemetry.get('observed_cape_j_kg')} J/kg | Wind: {telemetry.get('surface_wind_kmh')} km/h")
                 first_cycle = False
 
-            # 2. Ingest storm cells with persistent stable IDs and pinned centers
+            # 2. Compute optical flow motion field from consecutive radar frames
+            if settings.optical_flow_enabled:
+                grid = frame.get("grid")
+                if grid is not None:
+                    optical_flow_engine.push_frame(grid)
+                    if optical_flow_engine.frame_count >= 2:
+                        motion_field = optical_flow_engine.compute_motion_field()
+                        if first_cycle and motion_field is not None:
+                            print(f"[PIPELINE] Optical flow active: motion field shape {motion_field.shape}")
+
+            # 3. Ingest storm cells with persistent stable IDs and pinned centers
             detected = frame["storms"]
 
-            # 3. Track cells across time
+            # 4. Track cells across time (with optical flow velocity injection)
             tracked = storm_tracker.update(detected, timestamp=frame["timestamp"])
 
-            # 4. Predict trajectories
+            # 5. Predict trajectories (fused ML + optical flow)
             trajectories = storm_tracker.predict_trajectories()
 
-            # 5. Risk assessment for each cell
+            # 6. Risk assessment for each cell (ML probabilities + environmental context)
+            env_telemetry = frame.get("environmental_telemetry", {})
+            traj_by_id = {t["cell_id"]: t for t in trajectories}
             risks = []
             for cell in tracked:
-                risk = assess_storm_risk(cell)
+                enriched = enrich_storm_with_forecast_probs(cell, traj_by_id.get(cell["cell_id"]))
+                risk = assess_storm_risk(enriched, target=AHMEDABAD_TARGET, environmental=env_telemetry)
                 risks.append(risk)
 
-                # Auto-generate alerts for high/severe risk
-                if risk["risk_level"] in ("high", "severe"):
+                # Auto-generate alerts for high/severe risk with sufficient confidence
+                if (
+                    risk["risk_level"] in ("high", "severe")
+                    and risk.get("confidence_score", 0) >= 0.55
+                ):
                     try:
                         created_alert = auto_generate_alert(cell, risk)
                         if created_alert:
@@ -319,9 +341,18 @@ async def websocket_endpoint(websocket: WebSocket):
         tracked = storm_tracker.get_active_cells()
         if tracked:
             trajectories = storm_tracker.predict_trajectories()
-            risks = [assess_storm_risk(cell) for cell in tracked]
-            
             frame = data_generator.get_current_frame()
+            env_telemetry = frame.get("environmental_telemetry", {})
+            traj_by_id = {t["cell_id"]: t for t in trajectories}
+            risks = [
+                assess_storm_risk(
+                    enrich_storm_with_forecast_probs(cell, traj_by_id.get(cell["cell_id"])),
+                    target=AHMEDABAD_TARGET,
+                    environmental=env_telemetry,
+                )
+                for cell in tracked
+            ]
+
             lightning = data_generator.generate_lightning_data(frame)
             initial_radar_pts = extract_radar_points(frame["grid"])
             exposure = assess_all_infrastructure(tracked, trajectories)

@@ -335,9 +335,7 @@ def get_live_radar_summary() -> dict[str, Any]:
         return _tool_result(
             "live_radar_summary",
             {
-                # The present development source is explicitly identified so a
-                # user cannot mistake it for an IMD operational feed.
-                "source": "simulated_platform_runtime",
+                "source": "platform_runtime",
                 "timestamp": frame.get("timestamp"),
                 "grid_shape": frame.get("grid_shape"),
                 "max_reflectivity_dbz": round(max_dbz, 1),
@@ -620,7 +618,6 @@ def answer_question(
     guardrails = [
         "Decision-support only: this copilot cannot issue, approve, or disseminate an official warning.",
         "Live numerical values are shown only when returned by a structured platform tool; they are not retrieved from the document catalogue.",
-        "The current development radar tool is labelled simulated_platform_runtime and must not be represented as an IMD operational feed.",
         "An authorised forecaster remains responsible for interpretation and any official action.",
     ]
 

@@ -138,15 +138,14 @@ export function useWebSocket(url: string) {
             setAlertUpdate(message.data as AlertUpdate);
           }
         } catch (error) {
-          console.warn("Failed to parse WebSocket message:", error);
+          // Silent catch for unexpected payload formats
         }
       };
 
       socket.onerror = () => {
-        console.warn("WebSocket connecting/reconnecting notice");
+        // Silent error handler during WebSocket connection/reconnection
       };
     } catch (error) {
-      console.warn("WebSocket initialization notice:", error);
       if (isMounted.current) scheduleReconnect(reconnectDelay.current);
     }
   }, [scheduleReconnect, url]);
@@ -221,7 +220,6 @@ export function useWebSocket(url: string) {
         }
       } catch (error) {
         fallbackDelay.current = Math.min(fallbackDelay.current * 2, 30_000);
-        console.warn("REST fallback poll notice:", error);
       } finally {
         if (!cancelled && isMounted.current) {
           pollTimeout = setTimeout(fetchFallback, fallbackDelay.current);

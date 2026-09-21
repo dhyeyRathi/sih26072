@@ -3,6 +3,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
 import { StormUpdatePayload } from "@/lib/types";
+import { createStormMarkerElement, updateStormMarkerDbz, updateStormMarkerSelection } from "@/components/map/StormMarker";
+import { cn } from "@/lib/utils";
+import { Layers, Radar, Route, Cloud, Globe, Map as MapIcon, ChevronUp, ChevronDown, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface WeatherMapProps {
   data: StormUpdatePayload | null;
@@ -12,6 +16,7 @@ interface WeatherMapProps {
   showInfrastructure?: boolean;
   infrastructureAssets?: InfrastructureAsset[];
   focusLocation?: { lat: number; lon: number } | null;
+  onToggleInfrastructure?: () => void;
 }
 
 type RadarPoint = { lat: number; lon: number; dbz: number };
@@ -76,7 +81,7 @@ function lerpMarkers(animating: Map<string, AnimatingMarker>, rafRef: React.Muta
   }
 }
 
-export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStormId, showInfrastructure = false, infrastructureAssets = [], focusLocation = null }: WeatherMapProps) {
+export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStormId, showInfrastructure = false, infrastructureAssets = [], focusLocation = null, onToggleInfrastructure }: WeatherMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
@@ -85,11 +90,41 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
   const animatingRef = useRef<Map<string, AnimatingMarker>>(new Map());
   const rafRef = useRef<number | null>(null);
 
+  const [isSatelliteBase, setIsSatelliteBase] = useState(true);
+  const [showRadarLayer, setShowRadarLayer] = useState(true);
+  const [showTrajectoryLayer, setShowTrajectoryLayer] = useState(true);
+  const [showAssetLayer, setShowAssetLayer] = useState(showInfrastructure);
+  const [isLayerMenuOpen, setIsLayerMenuOpen] = useState(false);
+
+  useEffect(() => {
+    setShowAssetLayer(Boolean(showInfrastructure));
+  }, [showInfrastructure]);
+
   const [svgOverlay, setSvgOverlay] = useState<{
     polylines: Array<{ cellId: string; points: string; color: string }>;
     cones: Array<{ cellId: string; pathD: string; color: string }>;
     nodes: Array<{ x: number; y: number; label: string; color: string; confidence?: number }>;
   }>({ polylines: [], cones: [], nodes: [] });
+
+  useEffect(() => {
+    if (!map.current) return;
+    const visibility = showRadarLayer ? "visible" : "none";
+    ["radar-heatmap-layer", "radar-rainband-glow"].forEach((id) => {
+      if (map.current?.getLayer(id)) {
+        map.current.setLayoutProperty(id, "visibility", visibility);
+      }
+    });
+  }, [showRadarLayer]);
+
+  useEffect(() => {
+    if (!map.current) return;
+    if (map.current.getLayer("osm-satellite-layer")) {
+      map.current.setLayoutProperty("osm-satellite-layer", "visibility", isSatelliteBase ? "visible" : "none");
+    }
+    if (map.current.getLayer("osm-basemap-layer")) {
+      map.current.setLayoutProperty("osm-basemap-layer", "visibility", isSatelliteBase ? "none" : "visible");
+    }
+  }, [isSatelliteBase]);
 
   // Initialize Map Instance
   useEffect(() => {
@@ -97,37 +132,70 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
 
     const instance = new maplibregl.Map({
       container: mapContainer.current,
+      maxZoom: 20,
       style: {
         version: 8,
         sources: {
-          'esri-satellite': {
+          'osm-satellite': {
             type: 'raster',
             tiles: [
               'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
             ],
             tileSize: 256,
-            attribution: 'Esri'
+            maxzoom: 18,
+            attribution: 'Esri / OpenStreetMap Satellite'
           },
-          'esri-labels': {
+          'osm-basemap': {
             type: 'raster',
             tiles: [
-              'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
+              'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
             ],
-            tileSize: 256
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: '© OpenStreetMap contributors'
+          },
+          'osm-labels': {
+            type: 'raster',
+            tiles: [
+              'https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png'
+            ],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: '© OpenStreetMap contributors'
           },
           'radar-grid': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } }
         },
         layers: [
           {
-            id: 'esri-satellite-layer',
+            id: 'osm-satellite-layer',
             type: 'raster',
-            source: 'esri-satellite',
+            source: 'osm-satellite',
             minzoom: 0,
-            maxzoom: 18,
+            maxzoom: 19,
             paint: {
-              'raster-brightness-max': 0.72,
+              'raster-brightness-max': 0.75,
               'raster-contrast': 0.15,
-              'raster-saturation': -0.25
+              'raster-saturation': -0.20
+            }
+          },
+          {
+            id: 'osm-labels-layer',
+            type: 'raster',
+            source: 'osm-labels',
+            minzoom: 0,
+            maxzoom: 19,
+            paint: {
+              'raster-opacity': 0.95
+            }
+          },
+          {
+            id: 'osm-basemap-layer',
+            type: 'raster',
+            source: 'osm-basemap',
+            minzoom: 0,
+            maxzoom: 19,
+            layout: {
+              visibility: 'none'
             }
           },
           {
@@ -148,7 +216,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
                 0.80, 'rgba(217, 70, 239, 1.00)'    // Vivid Magenta (>65 dBZ Hail Core)
               ],
               'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 4, 45, 7, 100, 9, 175, 12, 280],
-              'heatmap-opacity': 0.96
+              'heatmap-opacity': 0.78
             }
           },
           {
@@ -168,16 +236,9 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
                 58, 'rgba(239, 68, 68, 1.0)',
                 66, 'rgba(217, 70, 239, 1.0)'
               ],
-              'circle-opacity': 0.85,
+              'circle-opacity': 0.72,
               'circle-blur': 0.70
             }
-          },
-          {
-            id: 'esri-labels-layer',
-            type: 'raster',
-            source: 'esri-labels',
-            minzoom: 0,
-            maxzoom: 18
           }
         ]
       },
@@ -185,6 +246,10 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       zoom: 8.5,
       pitch: 25,
       bearing: 0
+    });
+
+    instance.on('error', () => {
+      // Suppress benign map tile network notices so Next.js dev overlay stays clear
     });
 
     map.current = instance;
@@ -244,7 +309,10 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
 
   // Update SVG Trajectory Line + Uncertainty Cone Projections
   const syncSvgOverlay = useCallback(() => {
-    if (!map.current || !data || !data.trajectories) return;
+    if (!map.current || !data || !data.trajectories || !showTrajectoryLayer) {
+      setSvgOverlay({ polylines: [], cones: [], nodes: [] });
+      return;
+    }
 
     const polylines: Array<{ cellId: string; points: string; color: string }> = [];
     const cones: Array<{ cellId: string; pathD: string; color: string }> = [];
@@ -322,7 +390,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
     });
 
     setSvgOverlay({ polylines, cones, nodes });
-  }, [data]);
+  }, [data, showTrajectoryLayer]);
 
   useEffect(() => {
     if (!map.current) return;
@@ -381,27 +449,11 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       let marker = markersRef.current[storm.cell_id];
 
       if (!marker) {
-        // Create new marker at target position
-        const el = document.createElement('div');
-        el.className = 'storm-marker-node cursor-pointer group flex flex-col items-center select-none z-20';
-
-        el.innerHTML = `
-          <div class="relative flex items-center justify-center">
-            <span class="pulse-ring absolute w-10 h-10 rounded-full opacity-75 animate-ping" style="background-color: ${color};"></span>
-            <div class="marker-core w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white shadow-xl border-2 border-white transition-all group-hover:scale-125" style="background-color: ${color};">
-              ⚡
-            </div>
-          </div>
-          <div class="marker-label mt-1 px-2 py-0.5 rounded-md bg-slate-900/90 text-white text-[11px] font-semibold border border-slate-700/80 shadow-lg backdrop-blur whitespace-nowrap flex items-center gap-1">
-            <span>${storm.cell_id}</span>
-            <span style="color: ${color}; font-weight: 700;">• ${storm.max_reflectivity_dbz.toFixed(0)} dBZ</span>
-          </div>
-        `;
-
-        el.addEventListener('click', (e) => {
+        const el = createStormMarkerElement(storm.cell_id, storm.max_reflectivity_dbz, color, (e) => {
           e.stopPropagation();
           onStormSelect(storm.cell_id);
         });
+        updateStormMarkerSelection(el, isSelected);
 
         marker = new maplibregl.Marker({ element: el, anchor: 'center' })
           .setLngLat([targetLng, targetLat])
@@ -433,22 +485,9 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
           }
         }
 
-        // Update marker label/styling
         const el = marker.getElement();
-        const core = el.querySelector('.marker-core');
-        if (core) {
-          if (isSelected) {
-            core.className = 'marker-core w-10 h-10 rounded-full flex items-center justify-center text-[14px] font-bold text-white shadow-2xl border-4 border-amber-400 scale-110 transition-all';
-          } else {
-            core.className = 'marker-core w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-bold text-white shadow-xl border-2 border-white transition-all group-hover:scale-125';
-          }
-        }
-
-        // Update dBZ value in label
-        const dbzSpan = el.querySelector('.marker-label span:last-child');
-        if (dbzSpan) {
-          dbzSpan.innerHTML = `• ${storm.max_reflectivity_dbz.toFixed(0)} dBZ`;
-        }
+        updateStormMarkerSelection(el, isSelected);
+        updateStormMarkerDbz(el, storm.max_reflectivity_dbz, color);
       }
     });
 
@@ -460,7 +499,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
   useEffect(() => {
     const currentMap = map.current;
     if (!currentMap) return;
-    if (!showInfrastructure) {
+    if (!showAssetLayer) {
       Object.values(assetMarkersRef.current).forEach((marker) => marker.remove());
       assetMarkersRef.current = {};
       return;
@@ -503,7 +542,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
         element.style.boxShadow = `0 0 0 5px ${colours[asset.threat_level]}55`;
       }
     });
-  }, [infrastructureAssets, showInfrastructure]);
+  }, [infrastructureAssets, showAssetLayer]);
 
   useEffect(() => {
     if (!map.current || !focusLocation) return;
@@ -672,20 +711,156 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
         ))}
       </svg>
 
-      {/* Radar dBZ Reflectivity Scale Legend */}
-      <div className="absolute bottom-6 left-6 bg-[#0a0e27]/90 backdrop-blur-md border border-slate-700/60 rounded-lg p-2.5 z-30 shadow-xl flex flex-col space-y-1.5 text-xs select-none">
-        <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center justify-between">
-          <span>Doppler Radar (dBZ)</span>
-          <span className="text-emerald-400 font-mono text-[10px]">LIVE</span>
-        </div>
-        <div className="h-3 w-48 rounded overflow-hidden flex" style={{
-          background: 'linear-gradient(to right, rgba(6,182,212,0.8), rgba(34,197,94,0.9), rgba(234,179,8,0.95), rgba(249,115,22,1), rgba(239,68,68,1), rgba(217,70,239,1))'
-        }} />
-        <div className="flex justify-between text-[9px] font-mono text-slate-400 pt-0.5">
-          <span>10 (Drizzle)</span>
-          <span>35</span>
-          <span>50</span>
-          <span>70+ (Severe)</span>
+      {/* Collapsible Map Control & Layer Drawer */}
+      <div className="absolute bottom-6 right-6 z-30 flex flex-col items-end gap-2 select-none">
+        {/* Animated Popover Menu with ONLY Toggle Buttons */}
+        <AnimatePresence>
+          {isLayerMenuOpen && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              transition={{ duration: 0.15 }}
+              className="flex flex-col gap-3 rounded-xl border border-slate-700/80 bg-slate-900/95 p-3.5 shadow-2xl backdrop-blur-xl w-72"
+            >
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-200">
+                  <Layers className="h-4 w-4 text-sky-400" />
+                  <span>Map Controls & Layers</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsLayerMenuOpen(false)}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Map View Section */}
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Basemap View</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsSatelliteBase(true)}
+                    className={cn(
+                      "flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold tracking-wide transition-all",
+                      isSatelliteBase
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+                        : "bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700/50"
+                    )}
+                    title="OpenStreetMap Satellite Terrain with City & Area Labels"
+                  >
+                    <Globe className="h-3.5 w-3.5 text-emerald-400" />
+                    Satellite
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsSatelliteBase(false)}
+                    className={cn(
+                      "flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold tracking-wide transition-all",
+                      !isSatelliteBase
+                        ? "bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-[0_0_12px_rgba(14,165,233,0.2)]"
+                        : "bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700/50"
+                    )}
+                    title="OpenStreetMap Standard Vector Map"
+                  >
+                    <MapIcon className="h-3.5 w-3.5 text-sky-400" />
+                    Streets
+                  </button>
+                </div>
+              </div>
+
+              {/* Active Overlays Section */}
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Map Overlays</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowRadarLayer((v) => !v)}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all border",
+                      showRadarLayer
+                        ? "bg-sky-500/20 text-sky-200 border-sky-500/40"
+                        : "bg-slate-800/40 text-slate-400 border-slate-800 hover:bg-slate-800"
+                    )}
+                  >
+                    <Radar className="h-3.5 w-3.5 text-sky-400" />
+                    <span>Radar</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowTrajectoryLayer((v) => !v)}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all border",
+                      showTrajectoryLayer
+                        ? "bg-indigo-500/20 text-indigo-200 border-indigo-500/40"
+                        : "bg-slate-800/40 text-slate-400 border-slate-800 hover:bg-slate-800"
+                    )}
+                  >
+                    <Route className="h-3.5 w-3.5 text-indigo-400" />
+                    <span>Tracks</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAssetLayer((v) => !v);
+                      onToggleInfrastructure?.();
+                    }}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all border",
+                      showAssetLayer
+                        ? "bg-amber-500/20 text-amber-200 border-amber-500/40"
+                        : "bg-slate-800/40 text-slate-400 border-slate-800 hover:bg-slate-800"
+                    )}
+                  >
+                    <Layers className="h-3.5 w-3.5 text-amber-400" />
+                    <span>Assets</span>
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Compact Collapsible Trigger Button */}
+        <button
+          type="button"
+          onClick={() => setIsLayerMenuOpen((v) => !v)}
+          className={cn(
+            "flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3.5 py-2.5 text-xs font-bold text-slate-200 shadow-2xl backdrop-blur-xl transition-all hover:bg-slate-800",
+            isLayerMenuOpen && "border-sky-500/50 text-white ring-2 ring-sky-500/20"
+          )}
+        >
+          <Layers className="h-4 w-4 text-sky-400" />
+          <span>Map Layers</span>
+          <span className="ml-0.5 flex h-5 items-center rounded-full bg-sky-500/20 px-2 font-mono text-[10px] font-semibold text-sky-300 border border-sky-500/30">
+            {isSatelliteBase ? "Satellite" : "Streets"}
+          </span>
+          {isLayerMenuOpen ? <ChevronDown className="h-3.5 w-3.5 text-slate-400" /> : <ChevronUp className="h-3.5 w-3.5 text-slate-400" />}
+        </button>
+
+        {/* Doppler Reflectivity dBZ Legend - BELOW THE BUTTON & MENU */}
+        <div className="flex flex-col space-y-1.5 rounded-xl border border-slate-700/80 bg-slate-900/90 p-2.5 text-xs shadow-2xl backdrop-blur-xl w-64">
+          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-300">
+            <span>Doppler Reflectivity (dBZ)</span>
+            <span className="flex items-center gap-1 font-mono text-[9px] text-emerald-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> LIVE
+            </span>
+          </div>
+          <div
+            className="h-2.5 w-full overflow-hidden rounded-full shadow-inner"
+            style={{
+              background: "linear-gradient(to right, rgba(6,182,212,0.8), rgba(34,197,94,0.9), rgba(234,179,8,0.95), rgba(249,115,22,1), rgba(239,68,68,1), rgba(217,70,239,1))"
+            }}
+          />
+          <div className="flex justify-between font-mono text-[9px] text-slate-400">
+            <span>10 dBZ</span>
+            <span>35</span>
+            <span>50</span>
+            <span>70+ dBZ</span>
+          </div>
         </div>
       </div>
     </div>

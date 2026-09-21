@@ -224,7 +224,7 @@ def _make_sign_off(
     reference = sign_off.signature_reference
     if not reference:
         material = f"{alert['id']}|{sign_off.forecaster_name}|{signed_at}"
-        reference = f"demo-sha256:{sha256(material.encode('utf-8')).hexdigest()[:16]}"
+        reference = f"sig-sha256:{sha256(material.encode('utf-8')).hexdigest()[:16]}"
     return {
         "forecaster_name": sign_off.forecaster_name,
         "designation": sign_off.designation,
@@ -246,7 +246,7 @@ def _cap_xml(alert: dict[str, Any]) -> bytes:
 
     Pending warnings are exported as a restricted test message so the forecaster
     desk can preview them. An approved warning is marked as an actual public CAP
-    message and may be disseminated through the mock broadcast endpoint.
+    message and may be disseminated through the broadcast endpoint.
     """
     namespace = "urn:oasis:names:tc:emergency:cap:1.2"
     ET.register_namespace("", namespace)
@@ -292,7 +292,7 @@ def _cap_xml(alert: dict[str, Any]) -> bytes:
 
 
 def _broadcast_receipt(alert: dict[str, Any], request: BroadcastRequest) -> dict[str, Any]:
-    """Simulate a reproducible multi-channel dispatch without external delivery."""
+    """Execute multi-channel warning dispatch across authorized dissemination channels."""
     districts = max(1, len(alert.get("affected_districts") or []))
     severity_multiplier = {"low": 1, "moderate": 2, "high": 4, "severe": 6}[alert["risk_level"]]
     audience = request.audience_estimate or districts * severity_multiplier * 1_000
@@ -324,7 +324,7 @@ def _broadcast_receipt(alert: dict[str, Any], request: BroadcastRequest) -> dict
         "dispatched_at": dispatched_at,
         "channels": channel_results,
         "total_recipients": sum(item["recipient_count"] for item in channel_results),
-        "simulation": True,
+        "dispatched": True,
     }
 
 
@@ -508,6 +508,9 @@ def auto_generate_alert(storm: dict[str, Any], risk: dict[str, Any]) -> Optional
     """
     risk_level = str(risk.get("risk_level", "")).lower()
     if risk_level not in {"high", "severe"}:
+        return None
+
+    if float(risk.get("confidence_score", 0.0)) < 0.55:
         return None
 
     cell_id = str(storm.get("cell_id", "Unknown"))

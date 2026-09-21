@@ -1,8 +1,8 @@
 """
-SIH26072 — Deep Neural Nowcaster Inference Engine v2
-Loads PyTorch StormNowcasterMLP v2 weights and provides high-accuracy ML forecasts
-using Monte Carlo Dropout ensemble averaging for stable predictions and
-principled uncertainty estimates.
+SIH26072 — Deep Neural Nowcaster Inference Engine v3
+Loads PyTorch StormNowcasterMLP v3 weights and provides high-accuracy ML forecasts
+using Monte Carlo Dropout ensemble averaging with optical flow fusion for stable,
+non-linear trajectory predictions.
 """
 
 import os
@@ -11,7 +11,7 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 from src.config import settings
 from src.ml.model import StormNowcasterMLP
-from src.ml.trainer import WEIGHTS_PATH, train_nowcaster_model
+from src.ml.trainer import WEIGHTS_PATH, SCALER_PATH, train_nowcaster_model
 
 
 class StormMLInference:
@@ -19,30 +19,47 @@ class StormMLInference:
     Real-time inference manager for storm trajectory, reflectivity evolution,
     and probabilistic nowcasting.
 
-    Uses Monte Carlo Dropout: runs N forward passes with dropout enabled,
-    averages predictions for stability, uses std-dev for uncertainty.
+    v3 improvements:
+    - 18-feature input with optical flow velocity, divergence, curl
+    - Feature normalization using saved StandardScaler params
+    - 8 MC Dropout passes (vs 5) for better uncertainty estimates
+    - Optical flow trajectory fusion (short-term: 70% OF, long-term: 60% ML)
+    - Coordinate precision to 5 decimal places with cos(lat) correction
+    - Gujarat bounding box clamping
     """
 
-    MC_PASSES = 5  # Number of forward passes for MC Dropout averaging
+    MC_PASSES = 8  # Increased from 5 for more robust uncertainty
 
     def __init__(self, device: Optional[str] = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = StormNowcasterMLP(input_dim=14, hidden_dim=256, mc_dropout=0.1).to(self.device)
+        self.model = StormNowcasterMLP(input_dim=18, hidden_dim=320, mc_dropout=0.1).to(self.device)
         self.loaded = False
+        self.scaler_mean: Optional[np.ndarray] = None
+        self.scaler_std: Optional[np.ndarray] = None
         self.load_model()
 
     def load_model(self):
-        """Loads trained model weights from disk or triggers lightweight training."""
+        """Loads trained model weights and scaler from disk or triggers training."""
         try:
             if not os.path.exists(WEIGHTS_PATH):
-                print("[WARN] PyTorch Nowcaster v2 weights not found. Training model now...")
-                train_nowcaster_model(epochs=80)
+                print("[WARN] PyTorch Nowcaster v3 weights not found. Training model now...")
+                train_nowcaster_model(epochs=120)
 
             state_dict = torch.load(WEIGHTS_PATH, map_location=self.device)
             self.model.load_state_dict(state_dict)
             self.model.eval()
             self.loaded = True
-            print(f"[OK] Loaded PyTorch StormNowcasterMLP v2 on {self.device}")
+            print(f"[OK] Loaded PyTorch StormNowcasterMLP v3 on {self.device}")
+
+            # Load feature scaler
+            if os.path.exists(SCALER_PATH):
+                scaler_data = np.load(SCALER_PATH)
+                self.scaler_mean = scaler_data["mean"]
+                self.scaler_std = scaler_data["std"]
+                print(f"[OK] Loaded feature scaler ({len(self.scaler_mean)} features)")
+            else:
+                print("[WARN] Feature scaler not found. Using raw features.")
+
         except Exception as e:
             print(f"[ERROR] Failed to load PyTorch Nowcaster model: {e}")
             self.loaded = False
@@ -51,21 +68,26 @@ class StormMLInference:
         self,
         cell: Dict[str, Any],
         history_buffer: List[Dict[str, Any]],
-        horizons_minutes: List[int] = [15, 30, 45, 60]
+        horizons_minutes: List[int] = [15, 30, 45, 60],
+        optical_flow_trajectory: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Calculates non-linear ML forecasts for a single tracked storm cell
-        using Monte Carlo Dropout ensemble averaging.
+        using Monte Carlo Dropout ensemble averaging, fused with optical flow.
         """
         if not self.loaded:
             self.load_model()
 
-        # Extract features
+        # Extract 18-dim features
         features = self._extract_features(cell, history_buffer)
+
+        # Apply normalization
+        if self.scaler_mean is not None:
+            features = (features - self.scaler_mean) / self.scaler_std
+
         x_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
 
         # --- Monte Carlo Dropout Ensemble ---
-        # Enable dropout during inference for MC sampling
         self._enable_mc_dropout()
 
         all_traj = []
@@ -86,7 +108,7 @@ class StormMLInference:
 
         # Average across MC samples
         traj_offsets = np.mean(all_traj, axis=0)       # shape (4, 2)
-        traj_std = np.std(all_traj, axis=0)             # shape (4, 2) — for uncertainty
+        traj_std = np.std(all_traj, axis=0)             # shape (4, 2) — uncertainty
         dbz_forecasts = np.mean(all_dbz, axis=0)        # shape (4,)
         ts_probs = np.mean(all_ts, axis=0)              # shape (4,)
         lt_probs = np.mean(all_lt, axis=0)              # shape (4,)
@@ -95,6 +117,7 @@ class StormMLInference:
         center_lat = settings.mvp_center_lat
         center_lon = settings.mvp_center_lon
         grid_h, grid_w = settings.grid_height, settings.grid_width
+        precision = settings.coordinate_precision
 
         curr_y = cell["centroid_y"]
         curr_x = cell["centroid_x"]
@@ -108,8 +131,34 @@ class StormMLInference:
             pred_y = float(curr_y) + dy
             pred_x = float(curr_x) + dx
 
+            # Convert grid to lat/lon with cos(lat) correction
             pred_lat = float(center_lat + (pred_y - grid_h / 2) * (resolution_km / 111.0))
-            pred_lon = float(center_lon + (pred_x - grid_w / 2) * (resolution_km / 111.0))
+            cos_lat = np.cos(np.radians(pred_lat))
+            pred_lon = float(center_lon + (pred_x - grid_w / 2) * (resolution_km / (111.0 * max(0.5, cos_lat))))
+
+            # --- Optical Flow Fusion ---
+            if optical_flow_trajectory and idx < len(optical_flow_trajectory):
+                of_point = optical_flow_trajectory[idx]
+                of_lat = of_point.get("lat", pred_lat)
+                of_lon = of_point.get("lon", pred_lon)
+
+                # Fusion weights: short-term favors optical flow, long-term favors ML
+                if h <= 15:
+                    of_weight = 0.70
+                elif h <= 30:
+                    of_weight = 0.55
+                elif h <= 45:
+                    of_weight = 0.40
+                else:
+                    of_weight = 0.30
+
+                ml_weight = 1.0 - of_weight
+                pred_lat = of_weight * of_lat + ml_weight * pred_lat
+                pred_lon = of_weight * of_lon + ml_weight * pred_lon
+
+            # Clamp to Gujarat bounding box
+            pred_lat = float(np.clip(pred_lat, settings.gujarat_lat_min, settings.gujarat_lat_max))
+            pred_lon = float(np.clip(pred_lon, settings.gujarat_lon_min, settings.gujarat_lon_max))
 
             # Principled uncertainty from MC Dropout std-dev
             traj_variance = float(np.sqrt(traj_std[idx][0] ** 2 + traj_std[idx][1] ** 2))
@@ -122,23 +171,23 @@ class StormMLInference:
             pred_dbz = float(np.clip(dbz_forecasts[idx], 10.0, 75.0))
 
             # Confidence score inversely proportional to MC variance
-            confidence = float(np.clip(1.0 - traj_variance * 0.3, 0.3, 0.99))
+            confidence = float(np.clip(1.0 - traj_variance * 0.25, 0.3, 0.99))
 
             forecasts.append({
                 "horizon_minutes": int(h),
-                "predicted_lat": float(round(pred_lat, 4)),
-                "predicted_lon": float(round(pred_lon, 4)),
-                "predicted_dbz": float(round(pred_dbz, 1)),
-                "uncertainty_km": float(round(uncertainty_km, 1)),
-                "thunderstorm_probability": float(round(ts_prob, 2)),
-                "lightning_probability": float(round(lt_prob, 2)),
-                "confidence_score": float(round(confidence, 2)),
+                "predicted_lat": round(pred_lat, precision),
+                "predicted_lon": round(pred_lon, precision),
+                "predicted_dbz": round(pred_dbz, 1),
+                "uncertainty_km": round(uncertainty_km, 1),
+                "thunderstorm_probability": round(ts_prob, 2),
+                "lightning_probability": round(lt_prob, 2),
+                "confidence_score": round(confidence, 2),
             })
 
-            trajectory_coords.append([float(round(pred_lon, 4)), float(round(pred_lat, 4))])
+            trajectory_coords.append([round(pred_lon, precision), round(pred_lat, precision)])
 
         return {
-            "smoothing_model": "PyTorch-DeepNowcaster-v2-MCDropout",
+            "smoothing_model": "PyTorch-DeepNowcaster-v3-MCDropout-OpticalFlow",
             "forecasts": forecasts,
             "trajectory_coords": trajectory_coords,
         }
@@ -150,7 +199,7 @@ class StormMLInference:
                 module.train()
 
     def _extract_features(self, cell: Dict[str, Any], history: List[Dict[str, Any]]) -> np.ndarray:
-        """Constructs 14-dim feature vector for model input."""
+        """Constructs 18-dim feature vector for model input (expanded from 14)."""
         vx = cell.get("velocity_x", 0.6)
         vy = cell.get("velocity_y", -0.3)
 
@@ -187,10 +236,17 @@ class StormMLInference:
         lat_offset = (cell.get("center_lat", settings.mvp_center_lat) - settings.mvp_center_lat)
         lon_offset = (cell.get("center_lon", settings.mvp_center_lon) - settings.mvp_center_lon)
 
+        # Optical flow features (injected by tracker or zeroed)
+        of_vx = cell.get("optical_flow_vx", 0.0)
+        of_vy = cell.get("optical_flow_vy", 0.0)
+        of_div = cell.get("optical_flow_divergence", 0.0)
+        of_curl = cell.get("optical_flow_curl", 0.0)
+
         return np.array([
             vx, vy, ax, ay, max_dbz, mean_dbz, dbz_trend,
             area_sq_km, d_area, lightning_rate, d_lightning,
-            lat_offset, lon_offset, curvature
+            lat_offset, lon_offset, curvature,
+            of_vx, of_vy, of_div, of_curl,
         ], dtype=np.float32)
 
 

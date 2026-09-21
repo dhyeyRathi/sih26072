@@ -6,7 +6,7 @@ Provides real-time storm cell data, trajectories, and forecasts.
 from fastapi import APIRouter, Query
 from typing import Optional
 from src.storms.tracking import storm_tracker
-from src.risk.engine import assess_storm_risk
+from src.risk.engine import assess_storm_risk, enrich_storm_with_forecast_probs, AHMEDABAD_TARGET
 
 router = APIRouter(prefix="/storms", tags=["storms"])
 
@@ -42,12 +42,11 @@ async def get_storm_detail(cell_id: str):
     if not cell:
         return {"error": "Storm cell not found", "cell_id": cell_id}
 
-    # Get risk assessment
-    risk = assess_storm_risk(cell)
-
-    # Get trajectory
+    # Get trajectory and risk assessment with ML probabilities
     trajectories = storm_tracker.predict_trajectories()
     trajectory = next((t for t in trajectories if t["cell_id"] == cell_id), None)
+    enriched = enrich_storm_with_forecast_probs(cell, trajectory)
+    risk = assess_storm_risk(enriched, target=AHMEDABAD_TARGET)
 
     return {
         "cell": cell,

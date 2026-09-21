@@ -2,12 +2,16 @@
 Storm cell tracking — matches detected cells across consecutive radar scans.
 Uses heavy EMA smoothing for jitter-free positions and trajectory averaging
 across multiple prediction cycles for stable, non-flickering forecast paths.
+
+v3: Integrates optical flow velocity as primary motion source, fused with
+ML predictions using horizon-dependent weights.
 """
 
 import numpy as np
 from typing import Optional
 from src.config import settings
 from src.ml.inference import ml_inference
+from src.ml.optical_flow import optical_flow_engine
 
 
 class StormTracker:
@@ -170,6 +174,23 @@ class StormTracker:
                 }
                 self._active_cells[cell_id] = tracked_cell
                 self._missing_count[cell_id] = 0
+
+                # --- Inject optical flow features for ML model ---
+                if settings.optical_flow_enabled and optical_flow_engine.has_motion_field:
+                    of_vx, of_vy = optical_flow_engine.get_velocity_at_centroid(
+                        det["centroid_y"], det["centroid_x"]
+                    )
+                    of_div = optical_flow_engine.get_divergence_at(
+                        det["centroid_y"], det["centroid_x"]
+                    )
+                    of_curl = optical_flow_engine.get_curl_at(
+                        det["centroid_y"], det["centroid_x"]
+                    )
+                    tracked_cell["optical_flow_vx"] = of_vx
+                    tracked_cell["optical_flow_vy"] = of_vy
+                    tracked_cell["optical_flow_divergence"] = of_div
+                    tracked_cell["optical_flow_curl"] = of_curl
+
                 tracked.append(tracked_cell)
             else:
                 cell_id = det.get("cell_id") or self._new_id()
@@ -267,6 +288,28 @@ class StormTracker:
                     [f["predicted_lon"], f["predicted_lat"]] for f in raw_forecasts
                 ]
                 smoothing_model = "Linear-EMA-Fallback"
+
+            # ----- Optical Flow Trajectory (for fusion) -----
+            of_trajectory = None
+            if settings.optical_flow_enabled and optical_flow_engine.has_motion_field:
+                of_trajectory = optical_flow_engine.extrapolate_trajectory(
+                    cell["centroid_y"], cell["centroid_x"],
+                    horizons_minutes,
+                    time_step_minutes=float(settings.mvp_time_step_minutes),
+                )
+
+            # Re-run ML with optical flow fusion if available
+            if of_trajectory and smoothing_model != "Linear-EMA-Fallback":
+                try:
+                    ml_res_fused = ml_inference.predict_cell_nowcast(
+                        cell, history, horizons_minutes,
+                        optical_flow_trajectory=of_trajectory,
+                    )
+                    raw_forecasts = ml_res_fused["forecasts"]
+                    raw_coords = ml_res_fused["trajectory_coords"]
+                    smoothing_model = ml_res_fused["smoothing_model"]
+                except Exception:
+                    pass  # Keep original predictions
 
             # ----- Rolling Trajectory Averaging (Consensus Path) -----
             # Push raw prediction into the rolling window

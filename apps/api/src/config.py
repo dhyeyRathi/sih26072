@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     mvp_grid_resolution_km: int = 1
     mvp_time_step_minutes: int = 10
 
+    # Accuracy & Precision
+    coordinate_precision: int = 5  # decimal places (5 = ~1.1m)
+    optical_flow_enabled: bool = True
+    real_data_archive_dir: str = "./data/real_archive"
+
+    # Gujarat bounding box for coordinate clamping
+    gujarat_lat_min: float = 20.0
+    gujarat_lat_max: float = 25.0
+    gujarat_lon_min: float = 68.0
+    gujarat_lon_max: float = 75.0
+
     # Grid dimensions (derived: 200km / 1km = 200 cells)
     @property
     def grid_height(self) -> int:

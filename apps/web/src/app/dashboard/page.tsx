@@ -10,8 +10,6 @@ import { RiskPanel } from "@/components/panels/RiskPanel";
 import { ExposurePanel } from "@/components/panels/ExposurePanel";
 import { ExplainabilityModal } from "@/components/panels/ExplainabilityModal";
 import { ForecasterDesk } from "@/components/panels/ForecasterDesk";
-import { HistoricalAnalogueDrawer } from "@/components/panels/HistoricalAnalogueDrawer";
-import { MeteorologicalCopilot } from "@/components/panels/MeteorologicalCopilot";
 import { ModelComparisonModal } from "@/components/panels/ModelComparisonModal";
 
 type InfrastructureAsset = {
@@ -25,11 +23,7 @@ type InfrastructureAsset = {
 };
 
 export default function DashboardPage() {
-  // Keep browser traffic on the Next.js origin. The /ws rewrite forwards it
-  // to FastAPI, avoiding host/port and CORS mismatches in development or deployment.
-  const wsUrl = typeof window === "undefined"
-    ? ""
-    : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
 
   const { isConnected, lastMessageTime, stormData, systemHealth, alertUpdate } = useWebSocket(wsUrl);
   
@@ -37,8 +31,6 @@ export default function DashboardPage() {
   const [selectedStormId, setSelectedStormId] = useState<string | null>(null);
   const [showExposure, setShowExposure] = useState(false);
   const [showDesk, setShowDesk] = useState(false);
-  const [showHistorical, setShowHistorical] = useState(false);
-  const [showCopilot, setShowCopilot] = useState(false);
   const [showAblation, setShowAblation] = useState(false);
   const [showExplainability, setShowExplainability] = useState(false);
   const [pendingAlertCount, setPendingAlertCount] = useState(0);
@@ -71,7 +63,6 @@ export default function DashboardPage() {
   }, [alertUpdate]);
 
   useEffect(() => {
-    if (!showExposure) return;
     let cancelled = false;
     const refreshAssets = async () => {
       try {
@@ -86,25 +77,15 @@ export default function DashboardPage() {
     void refreshAssets();
     const timer = setInterval(refreshAssets, 10_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [showExposure]);
+  }, []);
 
   const selectedRisk = stormData?.risks.find(r => r.cell_id === selectedStormId) || null;
-  
-  // Find matching storm cell or construct fallback from risk data
-  const selectedStorm = stormData?.storms.find(s => s.cell_id === selectedStormId) || (
-    selectedRisk ? {
-      cell_id: selectedRisk.cell_id,
-      center_lat: selectedRisk.target?.lat || 22.8059,
-      center_lon: selectedRisk.target?.lon || 72.8040,
-      max_reflectivity_dbz: 52.5,
-      area_sq_km: 650,
-      lightning_rate: 28.5,
-      movement_speed_kmh: selectedRisk.speed_kmh || 12,
-      movement_direction_deg: selectedRisk.direction_deg || 45,
-      intensity: selectedRisk.intensity || (selectedRisk.risk_level === 'severe' ? 'severe' : 'strong'),
-      trend: selectedRisk.trend || 'steady'
-    } : null
-  );
+  const selectedStorm = stormData?.storms.find(s => s.cell_id === selectedStormId) || null;
+  const selectedForecast = stormData?.trajectories
+    ?.find((t) => t.cell_id === selectedStormId)
+    ?.forecasts.find((f) => f.horizon_minutes === horizon)
+    ?? stormData?.trajectories?.[0]?.forecasts.find((f) => f.horizon_minutes === horizon);
+  const horizonConfidence = horizon === 0 ? null : selectedForecast?.confidence_score ?? null;
 
   return (
     <main className="flex flex-col h-full w-full relative">
@@ -113,14 +94,22 @@ export default function DashboardPage() {
         isConnected={isConnected} 
         lastMessageTime={lastMessageTime} 
         pendingAlertCount={pendingAlertCount}
-        onOpenExposure={() => setShowExposure(true)}
+        stormData={stormData}
         onOpenDesk={() => setShowDesk(true)}
-        onOpenHistorical={() => setShowHistorical(true)}
         onOpenAblation={() => setShowAblation(true)}
-        onOpenCopilot={() => setShowCopilot(true)}
       />
       
       <div className="flex-1 relative w-full h-full">
+        {!stormData && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[var(--surface)]/40 backdrop-blur-[2px]">
+            <div className="glass-panel rounded-xl px-6 py-5 text-center shadow-2xl">
+              <div className="mx-auto mb-3 h-2 w-2 animate-pulse rounded-full bg-sky-400" />
+              <div className="text-sm font-semibold text-white">Connecting to nowcast stream</div>
+              <p className="mt-1 text-xs text-slate-400">Waiting for live radar, trajectories, and risk assessments.</p>
+            </div>
+          </div>
+        )}
+
         <WeatherMap 
           data={stormData} 
           forecastHorizon={horizon}
@@ -129,6 +118,7 @@ export default function DashboardPage() {
           showInfrastructure={showExposure}
           infrastructureAssets={infrastructureAssets}
           focusLocation={focusLocation}
+          onToggleInfrastructure={() => setShowExposure((prev) => !prev)}
         />
 
         {stormData && (
@@ -138,6 +128,7 @@ export default function DashboardPage() {
         <StormDetails 
           storm={selectedStorm} 
           risk={selectedRisk} 
+          awaitingSelection={Boolean(selectedStormId) && !selectedStorm}
           onClose={() => setSelectedStormId(null)} 
           onExplain={() => setShowExplainability(true)}
         />
@@ -146,12 +137,11 @@ export default function DashboardPage() {
           horizon={horizon} 
           onHorizonChange={setHorizon} 
           timestamp={stormData?.timestamp || null}
+          confidence={horizonConfidence}
         />
 
         <ExposurePanel open={showExposure} onClose={() => setShowExposure(false)} onFocus={setFocusLocation} />
         <ForecasterDesk open={showDesk} onClose={() => setShowDesk(false)} onPendingCountChange={setPendingAlertCount} />
-        <HistoricalAnalogueDrawer open={showHistorical} cellId={selectedStormId} onClose={() => setShowHistorical(false)} />
-        <MeteorologicalCopilot open={showCopilot} cellId={selectedStormId} onClose={() => setShowCopilot(false)} />
         <ExplainabilityModal open={showExplainability} cellId={selectedStormId} onClose={() => setShowExplainability(false)} />
         <ModelComparisonModal open={showAblation} onClose={() => setShowAblation(false)} />
       </div>

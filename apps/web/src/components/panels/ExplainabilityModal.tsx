@@ -49,8 +49,8 @@ export function ExplainabilityModal({ cellId, open, onClose }: ExplainabilityMod
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
-      <section role="dialog" aria-modal="true" className="max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-700 bg-[#0a0e27] shadow-2xl">
-        <header className="flex items-center justify-between border-b border-slate-700 p-5"><div><h2 className="flex items-center gap-2 text-lg font-bold text-white"><BrainCircuit className="h-5 w-5 text-sky-300" /> Why is the system warning?</h2><p className="mt-1 text-sm text-slate-400">Cell {cellId ?? "—"} · physically grounded diagnostic evidence</p></div><button onClick={onClose} className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"><X className="h-6 w-6" /></button></header>
+      <section role="dialog" aria-modal="true" className="glass-panel max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-2xl shadow-2xl">
+        <header className="flex items-center justify-between border-b border-[var(--border)] p-5"><div><h2 className="flex items-center gap-2 text-lg font-bold text-white"><BrainCircuit className="h-5 w-5 text-sky-300" /> Why is the system warning?</h2><p className="mt-1 text-sm text-slate-400">Cell {cellId ?? "—"} · physically grounded diagnostic evidence</p></div><button onClick={onClose} className="rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-white"><X className="h-6 w-6" /></button></header>
         <div className="max-h-[68vh] overflow-y-auto p-5">
           {error && <p className="rounded border border-rose-400/30 bg-rose-500/10 p-3 text-rose-200">{error}</p>}
           {!error && !currentData && <p className="text-slate-400">Preparing meteorological evidence…</p>}

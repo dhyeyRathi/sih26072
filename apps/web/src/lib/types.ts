@@ -12,6 +12,15 @@ export interface StormCell {
   movement_direction_deg: number;
   intensity: 'weak' | 'moderate' | 'strong' | 'severe';
   trend: 'intensifying' | 'steady' | 'weakening' | 'dissipating';
+  vil_kg_m2?: number;
+  vil_density_g_m3?: number;
+  echo_top_km?: number;
+  w_max_m_s?: number;
+  lightning_jump?: {
+    jump_detected: boolean;
+    dfrdt: number;
+    sigma_ratio: number;
+  };
 }
 
 export interface Forecast {
@@ -43,14 +52,26 @@ export interface StormTrajectory {
 export interface RiskAssessment {
   cell_id: string;
   risk_level: 'low' | 'moderate' | 'high' | 'severe';
+  raw_risk_level?: 'low' | 'moderate' | 'high' | 'severe';
+  previous_risk_level?: 'low' | 'moderate' | 'high' | 'severe' | null;
   thunderstorm_probability: number;
   lightning_probability: number;
+  confidence_score?: number;
   intensity: 'weak' | 'moderate' | 'strong' | 'severe';
   speed_kmh: number;
   direction_deg: number;
   trend: 'intensifying' | 'steady' | 'weakening' | 'dissipating';
-  eta_minutes?: number;
+  eta_minutes?: number | null;
   target?: { lat: number; lon: number };
+  vil_kg_m2?: number;
+  vil_density_g_m3?: number;
+  echo_top_km?: number;
+  w_max_m_s?: number;
+  lightning_jump?: {
+    jump_detected: boolean;
+    dfrdt: number;
+    sigma_ratio: number;
+  };
 }
 
 export interface LightningStrike {

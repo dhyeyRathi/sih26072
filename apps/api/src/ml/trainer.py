@@ -1,7 +1,8 @@
 """
-SIH26072 — Atmospheric Dataset Generator & PyTorch Model Trainer
-Generates physics-rich storm trajectory training datasets with wind shear, 
-storm rotation, anvil spread, and noise augmentation. Trains StormNowcasterMLP v2.
+SIH26072 — Real-Data PyTorch Model Trainer v3
+Trains StormNowcasterMLP v3 on REAL Open-Meteo historical weather observations.
+NO synthetic data is used. Features are normalized with StandardScaler.
+Severe storm events are oversampled for balanced training.
 """
 
 import os
@@ -11,200 +12,149 @@ import torch.optim as optim
 import numpy as np
 from typing import Tuple, Dict
 from src.ml.model import StormNowcasterMLP
+from src.ml.real_data_builder import build_real_dataset, DATASET_PATH
 
 
 WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
 WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "storm_nowcaster.pt")
+SCALER_PATH = os.path.join(WEIGHTS_DIR, "feature_scaler.npz")
 
 
-def generate_synthetic_storm_dataset(num_samples: int = 25000, seed: int = 42) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+def _compute_normalization_params(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute mean and std for StandardScaler normalization."""
+    mean = np.mean(X, axis=0)
+    std = np.std(X, axis=0)
+    # Prevent division by zero for constant features
+    std[std < 1e-6] = 1.0
+    return mean, std
+
+
+def _normalize_features(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """Apply StandardScaler normalization."""
+    return (X - mean) / std
+
+
+def _oversample_severe_events(
+    X: np.ndarray,
+    Y: Dict[str, np.ndarray],
+    oversample_factor: int = 3,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
-    Generates physics-guided synthetic storm trajectories and feature matrices.
-    
-    Physics modeled:
-    - Non-linear steering flow with environmental wind shear
-    - Storm cell acceleration and deceleration (convective bursts)
-    - Right-moving supercell turning vectors (Coriolis effect)
-    - Storm rotation (mesocyclone) influence on trajectory curvature
-    - Reflectivity evolution (convective growth, maturity, decay lifecycle)
-    - Lightning flash rate correlation with updraft strength
-    - Anvil spread affecting cell area growth
-    - Environmental instability affecting intensification rate
+    Oversample severe storm events (high dBZ, high lightning rate) to balance
+    the training set. Severe events are rare but most important for accuracy.
     """
-    np.random.seed(seed)
+    # Identify severe samples: max_dbz > 55 dBZ (feature index 4)
+    severe_mask = X[:, 4] > 55.0
 
-    inputs = []
-    target_trajs = []
-    target_dbz = []
-    target_ts_probs = []
-    target_lt_probs = []
+    if np.sum(severe_mask) == 0:
+        # Also try moderate threshold
+        severe_mask = X[:, 4] > 45.0
 
-    horizons = [15, 30, 45, 60]
-    time_step_min = 10.0
+    if np.sum(severe_mask) == 0:
+        return X, Y
 
-    for _ in range(num_samples):
-        # --- Kinematic initial conditions ---
-        speed_kmh = np.random.uniform(8.0, 60.0)
-        direction_deg = np.random.uniform(0.0, 360.0)
-        rad = np.radians(direction_deg)
+    severe_X = X[severe_mask]
+    severe_Y = {k: v[severe_mask] for k, v in Y.items()}
 
-        grid_dist_per_step = (speed_kmh * (time_step_min / 60.0)) / 1.0
-        vx = grid_dist_per_step * np.sin(rad)
-        vy = -grid_dist_per_step * np.cos(rad)
+    # Repeat severe samples
+    repeated_X = np.tile(severe_X, (oversample_factor, 1))
+    repeated_Y = {k: np.tile(v, (oversample_factor, 1) if v.ndim == 2 else (oversample_factor, 1, 1))
+                  for k, v in severe_Y.items()}
 
-        # --- Non-linear dynamics ---
-        # Turning rate: right-movers tend +0.05 rad/step, left-movers -0.05
-        storm_type = np.random.choice(["right_mover", "left_mover", "linear"], p=[0.4, 0.15, 0.45])
-        if storm_type == "right_mover":
-            turning_rate = np.random.uniform(0.02, 0.15)
-        elif storm_type == "left_mover":
-            turning_rate = np.random.uniform(-0.15, -0.02)
-        else:
-            turning_rate = np.random.uniform(-0.04, 0.04)
+    # Add small noise to repeated samples for diversity
+    noise = np.random.randn(*repeated_X.shape).astype(np.float32) * 0.02
+    noise[:, 11:] = 0  # Don't noise positional features
+    repeated_X += noise
 
-        # Wind shear modulation: stronger shear → more deviation at longer horizons
-        wind_shear_factor = np.random.uniform(0.0, 0.08)
+    # Concatenate
+    X_out = np.concatenate([X, repeated_X], axis=0)
+    Y_out = {k: np.concatenate([Y[k], repeated_Y[k]], axis=0) for k in Y}
 
-        # Acceleration (convective burst can speed up or slow down cell)
-        ax = np.random.uniform(-0.12, 0.12)
-        ay = np.random.uniform(-0.12, 0.12)
+    print(f"  Oversampled {np.sum(severe_mask)} severe events × {oversample_factor} "
+          f"→ {len(X_out)} total samples")
 
-        # --- Reflectivity and lightning ---
-        max_dbz = np.random.uniform(25.0, 70.0)
-        mean_dbz = max_dbz * np.random.uniform(0.60, 0.85)
-
-        # Storm lifecycle stage affects dBZ trend
-        lifecycle = np.random.choice(["growing", "mature", "decaying"], p=[0.35, 0.40, 0.25])
-        if lifecycle == "growing":
-            dbz_trend = np.random.uniform(0.5, 5.0)
-        elif lifecycle == "mature":
-            dbz_trend = np.random.uniform(-1.5, 1.5)
-        else:
-            dbz_trend = np.random.uniform(-5.0, -0.5)
-
-        area_sq_km = np.random.uniform(20.0, 500.0)
-        # Anvil spread: growing storms expand area
-        if lifecycle == "growing":
-            d_area = np.random.uniform(2.0, 25.0)
-        elif lifecycle == "mature":
-            d_area = np.random.uniform(-5.0, 10.0)
-        else:
-            d_area = np.random.uniform(-20.0, -2.0)
-
-        # Lightning rate correlates with updraft strength (proxy: max_dbz)
-        lightning_rate = max(0.0, (max_dbz - 30.0) * np.random.uniform(0.5, 3.0))
-        d_lightning = np.random.uniform(-4.0, 6.0) if lifecycle != "decaying" else np.random.uniform(-6.0, -1.0)
-
-        lat_offset = np.random.uniform(-0.9, 0.9)
-        lon_offset = np.random.uniform(-0.9, 0.9)
-        curvature = turning_rate
-
-        # Feature vector (dim=14)
-        x_feat = np.array([
-            vx, vy, ax, ay, max_dbz, mean_dbz, dbz_trend,
-            area_sq_km, d_area, lightning_rate, d_lightning,
-            lat_offset, lon_offset, curvature
-        ], dtype=np.float32)
-
-        # --- Ground truth simulation for 4 horizons ---
-        sample_trajs = []
-        sample_dbz = []
-        sample_ts = []
-        sample_lt = []
-
-        for h in horizons:
-            steps = h / time_step_min
-
-            # Integrated non-linear curved trajectory with wind shear
-            total_dx = 0.0
-            total_dy = 0.0
-            s_rad = rad
-            for s in range(1, int(steps) + 1):
-                s_rad += turning_rate
-                # Wind shear adds increasing deviation with altitude/time
-                shear_dx = wind_shear_factor * s * np.cos(s_rad + np.pi / 4)
-                shear_dy = wind_shear_factor * s * np.sin(s_rad + np.pi / 4)
-
-                s_vx = grid_dist_per_step * np.sin(s_rad) + ax * s + shear_dx
-                s_vy = -grid_dist_per_step * np.cos(s_rad) + ay * s + shear_dy
-                total_dx += s_vx
-                total_dy += s_vy
-
-            # Reflectivity evolution following lifecycle
-            h_dbz = np.clip(max_dbz + dbz_trend * (h / 20.0), 10.0, 75.0)
-
-            # Calibrated probabilities (sigmoid on dBZ thresholds)
-            ts_prob = 1.0 / (1.0 + np.exp(-(h_dbz - 32.0) / 5.0))
-            lt_prob = 1.0 / (1.0 + np.exp(-(h_dbz - 42.0) / 4.0))
-
-            sample_trajs.append([total_dx, total_dy])
-            sample_dbz.append(h_dbz)
-            sample_ts.append(ts_prob)
-            sample_lt.append(lt_prob)
-
-        inputs.append(x_feat)
-        target_trajs.append(sample_trajs)
-        target_dbz.append(sample_dbz)
-        target_ts_probs.append(sample_ts)
-        target_lt_probs.append(sample_lt)
-
-    X = np.array(inputs, dtype=np.float32)
-    Y = {
-        "trajectories": np.array(target_trajs, dtype=np.float32),
-        "dbz": np.array(target_dbz, dtype=np.float32),
-        "thunderstorm": np.array(target_ts_probs, dtype=np.float32),
-        "lightning": np.array(target_lt_probs, dtype=np.float32),
-    }
-
-    return X, Y
+    return X_out, Y_out
 
 
 def _augment_features(X: np.ndarray, noise_std: float = 0.03) -> np.ndarray:
     """Add small Gaussian noise to training features for robustness."""
     noise = np.random.randn(*X.shape).astype(np.float32) * noise_std
-    # Don't add noise to the curvature or positional features (indices 11-13)
+    # Don't add noise to positional features (indices 11-13) or optical flow placeholders (14-17)
     noise[:, 11:] = 0
     return X + noise
 
 
-def train_nowcaster_model(epochs: int = 80, batch_size: int = 128) -> Dict[str, float]:
+def train_nowcaster_model(epochs: int = 120, batch_size: int = 128) -> Dict[str, float]:
     """
-    Trains PyTorch StormNowcasterMLP v2 model and saves weights.
+    Trains PyTorch StormNowcasterMLP v3 model on REAL weather data.
     
-    Improvements:
-    - 25,000 training samples (vs 12,000)
-    - 80 epochs (vs 25-60)
-    - Noise augmentation for robustness
-    - Higher trajectory loss weight (5.0 vs 3.0) for path accuracy
-    - Gradient clipping for training stability
+    Process:
+    1. Fetch/load real Open-Meteo historical observations for Gujarat
+    2. Normalize features with StandardScaler (saved for inference)
+    3. Oversample severe storm events for balanced training
+    4. Train with noise augmentation, gradient clipping, cosine annealing
+    5. Validate on held-out test set
+    6. Save model weights and scaler parameters
     """
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-    print("[TRAIN] Training PyTorch StormNowcasterMLP v2 Model...")
-    X, Y = generate_synthetic_storm_dataset(num_samples=25000)
+    print("[TRAIN] Training PyTorch StormNowcasterMLP v3 on REAL weather data...")
 
-    # Noise augmentation
-    X_augmented = _augment_features(X.copy())
-    X_combined = np.concatenate([X, X_augmented], axis=0)
+    # Step 1: Get real training data
+    X, Y = build_real_dataset(years_back=3, min_samples=5000)
+
+    if len(X) < 50:
+        print("[WARN] Insufficient real data. Cannot train. Will train when more data is available.")
+        return {"mae_km": 0.0, "rmse_km": 0.0, "epochs": 0, "samples": len(X)}
+
+    print(f"  Raw dataset: {len(X)} samples, {X.shape[1]} features")
+
+    # Step 2: Feature normalization
+    mean, std = _compute_normalization_params(X)
+    X_norm = _normalize_features(X, mean, std)
+
+    # Save scaler for inference
+    np.savez(SCALER_PATH, mean=mean, std=std)
+    print(f"  Feature scaler saved to {SCALER_PATH}")
+
+    # Step 3: Oversample severe events
+    X_norm, Y = _oversample_severe_events(X_norm, Y)
+
+    # Step 4: Noise augmentation
+    X_augmented = _augment_features(X_norm.copy())
+    X_combined = np.concatenate([X_norm, X_augmented], axis=0)
     Y_combined = {
         k: np.concatenate([v, v], axis=0) for k, v in Y.items()
     }
 
-    # Train / Val Split (85/15)
-    split = int(0.85 * len(X_combined))
-    X_train = torch.tensor(X_combined[:split])
-    X_val = torch.tensor(X_combined[split:])
+    # Step 5: Train / Val / Test Split (70/15/15)
+    n = len(X_combined)
+    indices = np.random.permutation(n)
+    train_end = int(0.70 * n)
+    val_end = int(0.85 * n)
 
-    Y_train_traj = torch.tensor(Y_combined["trajectories"][:split])
-    Y_val_traj = torch.tensor(Y_combined["trajectories"][split:])
-    Y_train_dbz = torch.tensor(Y_combined["dbz"][:split])
-    Y_val_dbz = torch.tensor(Y_combined["dbz"][split:])
-    Y_train_ts = torch.tensor(Y_combined["thunderstorm"][:split])
-    Y_val_ts = torch.tensor(Y_combined["thunderstorm"][split:])
-    Y_train_lt = torch.tensor(Y_combined["lightning"][:split])
-    Y_val_lt = torch.tensor(Y_combined["lightning"][split:])
+    train_idx = indices[:train_end]
+    val_idx = indices[train_end:val_end]
+    test_idx = indices[val_end:]
 
-    model = StormNowcasterMLP(input_dim=14, hidden_dim=256, mc_dropout=0.1)
+    X_train = torch.tensor(X_combined[train_idx])
+    X_val = torch.tensor(X_combined[val_idx])
+    X_test = torch.tensor(X_combined[test_idx])
+
+    Y_train_traj = torch.tensor(Y_combined["trajectories"][train_idx])
+    Y_val_traj = torch.tensor(Y_combined["trajectories"][val_idx])
+    Y_test_traj = torch.tensor(Y_combined["trajectories"][test_idx])
+    Y_train_dbz = torch.tensor(Y_combined["dbz"][train_idx])
+    Y_val_dbz = torch.tensor(Y_combined["dbz"][val_idx])
+    Y_train_ts = torch.tensor(Y_combined["thunderstorm"][train_idx])
+    Y_val_ts = torch.tensor(Y_combined["thunderstorm"][val_idx])
+    Y_train_lt = torch.tensor(Y_combined["lightning"][train_idx])
+    Y_val_lt = torch.tensor(Y_combined["lightning"][val_idx])
+
+    print(f"  Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+
+    # Step 6: Initialize model
+    model = StormNowcasterMLP(input_dim=18, hidden_dim=320, mc_dropout=0.1)
     optimizer = optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
@@ -216,7 +166,10 @@ def train_nowcaster_model(epochs: int = 80, batch_size: int = 128) -> Dict[str, 
     )
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
+    # Step 7: Training loop
+    best_val_loss = float("inf")
     model.train()
+
     for epoch in range(epochs):
         epoch_loss = 0.0
         for batch_x, batch_traj, batch_dbz, batch_ts, batch_lt in loader:
@@ -228,8 +181,8 @@ def train_nowcaster_model(epochs: int = 80, batch_size: int = 128) -> Dict[str, 
             l_ts = bce_loss_fn(preds["thunderstorm_probs"], batch_ts)
             l_lt = bce_loss_fn(preds["lightning_probs"], batch_lt)
 
-            # Higher weight on trajectory accuracy
-            loss = 5.0 * l_traj + 0.3 * l_dbz + 0.8 * l_ts + 0.8 * l_lt
+            # Higher weight on trajectory accuracy (the user's primary concern)
+            loss = 6.0 * l_traj + 0.3 * l_dbz + 0.8 * l_ts + 0.8 * l_lt
             loss.backward()
 
             # Gradient clipping for stability
@@ -240,26 +193,48 @@ def train_nowcaster_model(epochs: int = 80, batch_size: int = 128) -> Dict[str, 
 
         scheduler.step()
 
-        if (epoch + 1) % 20 == 0:
-            avg_loss = epoch_loss / len(loader)
-            print(f"   Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f}")
+        # Validation check
+        if (epoch + 1) % 10 == 0:
+            model.eval()
+            with torch.no_grad():
+                val_preds = model(X_val)
+                v_traj = mse_loss_fn(val_preds["trajectory_offsets"], Y_val_traj)
+                v_dbz = mse_loss_fn(val_preds["dbz_forecasts"], Y_val_dbz)
+                v_ts = bce_loss_fn(val_preds["thunderstorm_probs"], Y_val_ts)
+                v_lt = bce_loss_fn(val_preds["lightning_probs"], Y_val_lt)
+                val_loss = 6.0 * v_traj + 0.3 * v_dbz + 0.8 * v_ts + 0.8 * v_lt
 
-    # Validation evaluation
+            avg_train = epoch_loss / max(1, len(loader))
+            print(f"   Epoch {epoch + 1}/{epochs} - Train: {avg_train:.4f}, Val: {val_loss.item():.4f}")
+
+            if val_loss.item() < best_val_loss:
+                best_val_loss = val_loss.item()
+                torch.save(model.state_dict(), WEIGHTS_PATH)
+
+            model.train()
+
+    # Step 8: Final test evaluation
     model.eval()
     with torch.no_grad():
-        val_preds = model(X_val)
-        val_traj_err = torch.abs(val_preds["trajectory_offsets"] - Y_val_traj)
-        mae_km = float(val_traj_err.mean().item())
-        rmse_km = float(torch.sqrt((val_traj_err ** 2).mean()).item())
+        test_preds = model(X_test)
+        test_traj_err = torch.abs(test_preds["trajectory_offsets"] - Y_test_traj)
+        mae_km = float(test_traj_err.mean().item())
+        rmse_km = float(torch.sqrt((test_traj_err ** 2).mean()).item())
 
-    # Save model weights
-    torch.save(model.state_dict(), WEIGHTS_PATH)
-    print(f"[OK] Trained PyTorch Nowcaster v2 Saved: {WEIGHTS_PATH} (MAE: {mae_km:.3f} km, RMSE: {rmse_km:.3f} km)")
+    # Save final weights if no validation checkpoint was saved
+    if not os.path.exists(WEIGHTS_PATH):
+        torch.save(model.state_dict(), WEIGHTS_PATH)
+
+    print(f"[OK] Trained PyTorch Nowcaster v3 Saved: {WEIGHTS_PATH}")
+    print(f"     Test MAE: {mae_km:.3f} grid units, Test RMSE: {rmse_km:.3f} grid units")
+    print(f"     Total samples: {len(X_combined)}, Epochs: {epochs}")
 
     return {
         "mae_km": round(mae_km, 3),
         "rmse_km": round(rmse_km, 3),
         "epochs": epochs,
+        "samples": len(X_combined),
+        "best_val_loss": round(best_val_loss, 4),
     }
 
 
