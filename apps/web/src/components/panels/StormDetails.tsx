@@ -1,6 +1,6 @@
 import { StormCell, RiskAssessment } from "@/lib/types";
 import { Zap, Wind, Navigation, Activity, BrainCircuit, X, TrendingUp, TrendingDown, Minus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatEta } from "@/lib/utils";
 import { Panel } from "@/components/ui/Panel";
 import { Badge } from "@/components/ui/Badge";
 import { MetricTile } from "@/components/ui/MetricTile";
@@ -24,7 +24,7 @@ export function StormDetails({ storm, risk, onClose, onExplain, awaitingSelectio
   if (!storm) {
     if (!awaitingSelection) return null;
     return (
-      <Panel className="absolute top-4 right-4 z-30 w-80">
+      <Panel variant="opaque" className="absolute top-4 right-4 z-30 w-80">
         <div className="p-4">
           <h2 className="text-sm font-semibold text-white">Storm details</h2>
           <p className="mt-2 text-sm text-slate-400">Awaiting cell data. Select a storm on the map when live nowcast arrives.</p>
@@ -49,6 +49,7 @@ export function StormDetails({ storm, risk, onClose, onExplain, awaitingSelectio
 
   return (
     <Panel
+      variant="opaque"
       className="absolute top-4 right-4 z-30 w-80 max-h-[85vh] flex flex-col overflow-hidden"
       header={
         <div className="flex flex-col gap-2">
@@ -78,14 +79,7 @@ export function StormDetails({ storm, risk, onClose, onExplain, awaitingSelectio
           </div>
         </div>
       }
-      footer={
-        <button
-          onClick={() => onExplain?.(storm.cell_id)}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs font-semibold text-sky-100 transition hover:bg-sky-400/20"
-        >
-          <BrainCircuit className="h-4 w-4" /> Explain warning
-        </button>
-      }
+      footer={null}
     >
       <div className="overflow-y-auto flex-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent pb-4">
         <div className="grid grid-cols-2 gap-px bg-white/10">
@@ -211,7 +205,7 @@ export function StormDetails({ storm, risk, onClose, onExplain, awaitingSelectio
 
             {risk.eta_minutes != null && (
               <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 mt-4 shadow-sm">
-                Estimated arrival at Ahmedabad: <strong className="font-bold text-amber-400 text-sm ml-1">{risk.eta_minutes} min</strong>
+                Estimated arrival at Ahmedabad: <strong className="font-bold text-amber-400 text-sm ml-1">{formatEta(risk.eta_minutes)}</strong>
               </div>
             )}
 

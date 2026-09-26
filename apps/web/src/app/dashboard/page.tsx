@@ -9,7 +9,6 @@ import { StormDetails } from "@/components/panels/StormDetails";
 import { RiskPanel } from "@/components/panels/RiskPanel";
 import { ExposurePanel } from "@/components/panels/ExposurePanel";
 import { ExplainabilityModal } from "@/components/panels/ExplainabilityModal";
-import { ForecasterDesk } from "@/components/panels/ForecasterDesk";
 import { ModelComparisonModal } from "@/components/panels/ModelComparisonModal";
 
 type InfrastructureAsset = {
@@ -30,37 +29,11 @@ export default function DashboardPage() {
   const [horizon, setHorizon] = useState<number>(0);
   const [selectedStormId, setSelectedStormId] = useState<string | null>(null);
   const [showExposure, setShowExposure] = useState(false);
-  const [showDesk, setShowDesk] = useState(false);
   const [showAblation, setShowAblation] = useState(false);
   const [showExplainability, setShowExplainability] = useState(false);
-  const [pendingAlertCount, setPendingAlertCount] = useState(0);
   const [infrastructureAssets, setInfrastructureAssets] = useState<InfrastructureAsset[]>([]);
   const [focusLocation, setFocusLocation] = useState<{ lat: number; lon: number } | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    const refreshPendingAlerts = async () => {
-      try {
-        const response = await fetch("/api/alerts/pending");
-        if (!response.ok) return;
-        const body = await response.json();
-        if (!cancelled) setPendingAlertCount(body.count ?? 0);
-      } catch {
-        // The desk itself presents a useful error state if the API is unavailable.
-      }
-    };
-    void refreshPendingAlerts();
-    const timer = setInterval(refreshPendingAlerts, 10_000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, []);
-
-  useEffect(() => {
-    if (!alertUpdate) return;
-    fetch("/api/alerts/pending")
-      .then((response) => response.ok ? response.json() : null)
-      .then((body) => { if (body) setPendingAlertCount(body.count ?? 0); })
-      .catch(() => undefined);
-  }, [alertUpdate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,9 +66,7 @@ export default function DashboardPage() {
         health={systemHealth} 
         isConnected={isConnected} 
         lastMessageTime={lastMessageTime} 
-        pendingAlertCount={pendingAlertCount}
         stormData={stormData}
-        onOpenDesk={() => setShowDesk(true)}
         onOpenAblation={() => setShowAblation(true)}
       />
       
@@ -141,7 +112,6 @@ export default function DashboardPage() {
         />
 
         <ExposurePanel open={showExposure} onClose={() => setShowExposure(false)} onFocus={setFocusLocation} />
-        <ForecasterDesk open={showDesk} onClose={() => setShowDesk(false)} onPendingCountChange={setPendingAlertCount} />
         <ExplainabilityModal open={showExplainability} cellId={selectedStormId} onClose={() => setShowExplainability(false)} />
         <ModelComparisonModal open={showAblation} onClose={() => setShowAblation(false)} />
       </div>

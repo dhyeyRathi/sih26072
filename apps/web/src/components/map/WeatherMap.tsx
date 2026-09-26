@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as maplibregl from "maplibre-gl";
 import { StormUpdatePayload } from "@/lib/types";
 import { createStormMarkerElement, updateStormMarkerDbz, updateStormMarkerSelection } from "@/components/map/StormMarker";
-import { cn } from "@/lib/utils";
+import { cn, formatEta } from "@/lib/utils";
 import { Layers, Radar, Route, Cloud, Globe, Map as MapIcon, ChevronUp, ChevronDown, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -200,44 +200,21 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
           },
           {
             id: 'radar-heatmap-layer',
-            type: 'heatmap',
+            type: 'fill',
             source: 'radar-grid',
             paint: {
-              'heatmap-weight': ['get', 'weight'],
-              'heatmap-intensity': 5.5,
-              'heatmap-color': [
-                'interpolate', ['linear'], ['heatmap-density'],
-                0.00, 'rgba(0, 0, 0, 0)',
-                0.005, 'rgba(6, 182, 212, 0.70)',   // Electric Cyan (Drizzle 10-25 dBZ)
-                0.05, 'rgba(34, 197, 94, 0.88)',    // Lush Emerald Green (Light Rain 25-35 dBZ)
-                0.15, 'rgba(234, 179, 8, 0.95)',    // Bright Sunflower Yellow (Moderate Rain 35-45 dBZ)
-                0.35, 'rgba(249, 115, 22, 1.00)',   // Fiery Orange (Heavy Rain 45-55 dBZ)
-                0.60, 'rgba(239, 68, 68, 1.00)',    // Intense Crimson Red (Severe Storm 55-65 dBZ)
-                0.80, 'rgba(217, 70, 239, 1.00)'    // Vivid Magenta (>65 dBZ Hail Core)
-              ],
-              'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 4, 45, 7, 100, 9, 175, 12, 280],
-              'heatmap-opacity': 0.78
-            }
-          },
-          {
-            id: 'radar-rainband-glow',
-            type: 'circle',
-            source: 'radar-grid',
-            minzoom: 5,
-            filter: ['>=', ['get', 'dbz'], 14],
-            paint: {
-              'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 14, 8.5, 30, 11, 50, 14, 70],
-              'circle-color': [
+              'fill-color': [
                 'step', ['get', 'dbz'],
-                'rgba(6, 182, 212, 0.65)',
-                25, 'rgba(34, 197, 94, 0.85)',
-                38, 'rgba(234, 179, 8, 0.92)',
-                48, 'rgba(249, 115, 22, 0.98)',
-                58, 'rgba(239, 68, 68, 1.0)',
-                66, 'rgba(217, 70, 239, 1.0)'
+                'rgba(0, 0, 0, 0)',
+                12, 'rgba(6, 182, 212, 0.50)',   // Electric Cyan
+                25, 'rgba(34, 197, 94, 0.65)',    // Lush Emerald Green
+                38, 'rgba(234, 179, 8, 0.75)',    // Bright Sunflower Yellow
+                48, 'rgba(249, 115, 22, 0.85)',   // Fiery Orange
+                58, 'rgba(239, 68, 68, 0.90)',    // Intense Crimson Red
+                66, 'rgba(217, 70, 239, 0.95)'    // Vivid Magenta
               ],
-              'circle-opacity': 0.72,
-              'circle-blur': 0.70
+              'fill-outline-color': 'rgba(255, 255, 255, 0.1)',
+              'fill-opacity': 1.0
             }
           }
         ]
@@ -262,17 +239,31 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
           try {
             const rSource = map.current.getSource('radar-grid') as maplibregl.GeoJSONSource | undefined;
             if (rSource) {
-              const radarFeatures = points.map((p) => ({
-                type: 'Feature' as const,
-                properties: {
-                  dbz: Number(p.dbz),
-                  weight: Math.max(1.0, (Number(p.dbz) - 8.0) * 0.4)
-                },
-                geometry: {
-                  type: 'Point' as const,
-                  coordinates: [Number(p.lon), Number(p.lat)]
-                }
-              }));
+              const radarFeatures = points.map((p) => {
+                const lat = Number(p.lat);
+                const lon = Number(p.lon);
+                // 1km grid resolution corresponds to +/- 0.5km from center
+                const dLat = 0.0045; // ~0.5km in degrees lat
+                const dLon = 0.0045 / Math.cos(lat * (Math.PI / 180));
+                
+                return {
+                  type: 'Feature' as const,
+                  properties: {
+                    dbz: Number(p.dbz),
+                    weight: Math.max(1.0, (Number(p.dbz) - 8.0) * 0.4)
+                  },
+                  geometry: {
+                    type: 'Polygon' as const,
+                    coordinates: [[
+                      [lon - dLon, lat - dLat],
+                      [lon + dLon, lat - dLat],
+                      [lon + dLon, lat + dLat],
+                      [lon - dLon, lat + dLat],
+                      [lon - dLon, lat - dLat]
+                    ]]
+                  }
+                };
+              });
               rSource.setData({
                 type: 'FeatureCollection',
                 features: radarFeatures
@@ -306,6 +297,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       map.current = null;
     };
   }, [onStormSelect]);
+
 
   // Update SVG Trajectory Line + Uncertainty Cone Projections
   const syncSvgOverlay = useCallback(() => {
@@ -525,7 +517,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       if (!marker) {
         const element = document.createElement("button");
         element.type = "button";
-        element.title = `${asset.name} — ${asset.threat_level}${asset.estimated_arrival_minutes == null ? "" : `, ETA ${asset.estimated_arrival_minutes} min`}`;
+        element.title = `${asset.name} — ${asset.threat_level}${asset.estimated_arrival_minutes == null ? "" : `, ETA ${formatEta(asset.estimated_arrival_minutes)}`}`;
         element.setAttribute("aria-label", element.title);
         element.style.cssText = `width:25px;height:25px;border-radius:9999px;border:2px solid white;background:${colours[asset.threat_level]};color:#fff;font-size:13px;font-weight:700;box-shadow:0 0 0 5px ${colours[asset.threat_level]}55;cursor:pointer;display:flex;align-items:center;justify-content:center;`;
         element.textContent = symbols[asset.category] ?? "●";

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: sih26072-api
+    env: docker
+    rootDir: apps/api
+    plan: standard # ML APIs usually need more RAM (e.g., standard or pro instance on Render)
+    healthCheckPath: /docs # Optional, just to verify it's up
+    envVars:
+      - key: API_CORS_ORIGINS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false

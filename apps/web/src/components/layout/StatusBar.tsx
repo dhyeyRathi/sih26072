@@ -14,10 +14,8 @@ interface StatusBarProps {
   health: SystemHealth | null;
   isConnected: boolean;
   lastMessageTime: Date | null;
-  pendingAlertCount?: number;
   stormData?: StormUpdatePayload | null;
   onOpenExposure?: () => void;
-  onOpenDesk?: () => void;
   onOpenAblation?: () => void;
 }
 
@@ -69,8 +67,8 @@ function ToolButton({
 }
 
 export function StatusBar({
-  health, isConnected, lastMessageTime, pendingAlertCount = 0,
-  stormData, onOpenExposure, onOpenDesk, onOpenAblation,
+  health, isConnected, lastMessageTime,
+  stormData, onOpenExposure, onOpenAblation,
 }: StatusBarProps) {
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -160,7 +158,6 @@ export function StatusBar({
 
         <div className="flex items-center gap-2 shrink-0">
           <nav className="flex items-center gap-1 bg-white/5 rounded-lg p-1 border border-white/5" aria-label="Operations tools">
-            <ToolButton label="Desk" title="Forecaster warning desk" onClick={onOpenDesk} icon={<ShieldCheck className="h-4 w-4" />} badge={pendingAlertCount} />
             <ToolButton label="Models" title="Model ablation comparison" onClick={onOpenAblation} icon={<BarChart3 className="h-4 w-4" />} />
           </nav>
 

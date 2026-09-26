@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Building2, MapPin, Plane, Route, X } from "lucide-react";
 import { Panel } from "@/components/ui/Panel";
+import { formatEta } from "@/lib/utils";
 
 type Asset = {
   id: string;
@@ -120,8 +121,8 @@ export function ExposurePanel({ open, onClose, onFocus }: ExposurePanelProps) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2"><span className="text-sm font-bold text-white tracking-wide">{asset.name}</span><span className={`shrink-0 rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${threatStyles[asset.threat_level]}`}>{asset.threat_level}</span></div>
                 <div className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-400"><MapPin className="h-3.5 w-3.5" />{asset.district}</div>
-                <div className="mt-3 text-xs font-semibold text-slate-300 bg-white/5 rounded-lg p-2 border border-white/5 inline-block">
-                  {asset.estimated_arrival_minutes == null ? "No projected arrival" : `ETA ${asset.estimated_arrival_minutes} min`}
+                <div className="mt-2.5 flex items-center justify-between text-xs font-semibold text-slate-300">
+                  {asset.estimated_arrival_minutes == null ? "No projected arrival" : `ETA ${formatEta(asset.estimated_arrival_minutes)}`}
                   {asset.distance_to_storm_km != null && <span className="text-slate-500 font-normal"> · {asset.distance_to_storm_km} km</span>}
                 </div>
               </div>

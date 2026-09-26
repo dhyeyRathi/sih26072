@@ -5,6 +5,7 @@ import { RiskAssessment } from "@/lib/types";
 import { BrainCircuit, Clock, MapPin, ShieldAlert, TrendingDown, TrendingUp, Minus, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Panel } from "@/components/ui/Panel";
+import { formatEta } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
 
 interface RiskPanelProps {
@@ -151,16 +152,11 @@ export function RiskPanel({ risks, onSelect, onExplain }: RiskPanelProps) {
                 {risk.eta_minutes != null && (
                   <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 p-2 rounded-lg mt-2">
                     <Clock className="h-3.5 w-3.5" />
-                    <span className="font-semibold">ETA Ahmedabad: {risk.eta_minutes} min</span>
+                    <span className="font-semibold">ETA Ahmedabad: {formatEta(risk.eta_minutes)}</span>
                   </div>
                 )}
 
-                <button
-                  onClick={(e) => { e.stopPropagation(); onExplain?.(risk.cell_id); }}
-                  className="mt-1 flex items-center gap-1 text-xs font-medium text-sky-300 hover:text-sky-100"
-                >
-                  <BrainCircuit className="h-3.5 w-3.5" /> Explain warning
-                </button>
+
               </div>
             </div>
           ))
